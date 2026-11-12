@@ -1,0 +1,2379 @@
+diff --git a/submodules/AccountContext/Sources/AccountContext.swift b/submodules/AccountContext/Sources/AccountContext.swift
+index b6d2c19987..59ae2e9ff8 100644
+--- a/submodules/AccountContext/Sources/AccountContext.swift
++++ b/submodules/AccountContext/Sources/AccountContext.swift
+@@ -1551,6 +1551,9 @@ public protocol SharedAccountContext: AnyObject {
+     ) -> ChatHistoryListNode
+     func subscribeChatListData(context: AccountContext, location: ChatListControllerLocation) -> Signal<EngineChatList, NoError>
+     func makeChatMessagePreviewItem(context: AccountContext, messages: [EngineMessage], theme: PresentationTheme, strings: PresentationStrings, wallpaper: TelegramWallpaper, fontSize: PresentationFontSize, chatBubbleCorners: PresentationChatBubbleCorners, dateTimeFormat: PresentationDateTimeFormat, nameOrder: PresentationPersonNameOrder, forcedResourceStatus: FileMediaResourceStatus?, tapMessage: ((EngineMessage) -> Void)?, clickThroughMessage: ((UIView?, CGPoint?) -> Void)?, backgroundNode: ASDisplayNode?, availableReactions: AvailableReactions?, accountPeer: EnginePeer?, isCentered: Bool, isPreview: Bool, isStandalone: Bool, rank: String?, rankRole: ChatRankInfoScreenRole?, isGiftMessageComposerPreview: Bool, activateGiftMessageInput: (() -> Void)?) -> ListViewItem
++    /// A chat message bubble for the screenshot editor: its text can be selected, and the selection menu offers only
++    /// "Cut from screenshot", which reports the selected range of `message.text` through `hooks`.
++    func makeChatScreenshotMessageItem(context: AccountContext, messages: [EngineMessage], theme: PresentationTheme, strings: PresentationStrings, wallpaper: TelegramWallpaper, fontSize: PresentationFontSize, chatBubbleCorners: PresentationChatBubbleCorners, dateTimeFormat: PresentationDateTimeFormat, nameOrder: PresentationPersonNameOrder, backgroundNode: ASDisplayNode?, availableReactions: AvailableReactions?, accountPeer: EnginePeer?, hooks: ChatScreenshotMessageItemHooks) -> ListViewItem
+     /// A message bubble's content for a feed row (the News tab's expanded post): the bubble's text, link preview and
+     /// other content, drawn without the bubble's background and author line. The host draws the channel line and the
+     /// photos and videos (the item never shows them).
+@@ -2328,3 +2331,22 @@ public extension SharedAccountContext {
+         return self.makeWalletScreen(context: context, opensCollectibles: false)
+     }
+ }
++
++/// Callbacks that let a screenshot editor host chat bubbles with live text selection.
++public final class ChatScreenshotMessageItemHooks {
++    /// The node the selection menu is positioned against.
++    public let rootNode: () -> ASDisplayNode?
++    /// Presents the selection menu.
++    public let present: (ViewController, Any?) -> Void
++    /// The user chose "Cut from screenshot" for `range` (UTF-16 offsets of `message.text`).
++    public let cutText: (EngineMessage.Id, Range<Int>) -> Void
++    /// The user swiped the bubble to the left: hide the message from the screenshot, or show it again.
++    public let toggleHidden: (EngineMessage.Id) -> Void
++
++    public init(rootNode: @escaping () -> ASDisplayNode?, present: @escaping (ViewController, Any?) -> Void, cutText: @escaping (EngineMessage.Id, Range<Int>) -> Void, toggleHidden: @escaping (EngineMessage.Id) -> Void) {
++        self.rootNode = rootNode
++        self.present = present
++        self.cutText = cutText
++        self.toggleHidden = toggleHidden
++    }
++}
+diff --git a/submodules/GalleryUI/Sources/ChatItemGalleryFooterContentNode.swift b/submodules/GalleryUI/Sources/ChatItemGalleryFooterContentNode.swift
+index cf7dbaed3d..e636e59b56 100644
+--- a/submodules/GalleryUI/Sources/ChatItemGalleryFooterContentNode.swift
++++ b/submodules/GalleryUI/Sources/ChatItemGalleryFooterContentNode.swift
+@@ -601,7 +601,7 @@ final class ChatItemGalleryFooterContentNode: GalleryFooterContentNode, ASScroll
+                         self.controllerInteraction?.presentController(translateController, nil)
+                     }
+                 })
+-            case .quote:
++            case .quote, .cutFromScreenshot:
+                 break
+             }
+         })
+diff --git a/submodules/InvisibleInkDustNode/Sources/InvisibleInkDustNode.swift b/submodules/InvisibleInkDustNode/Sources/InvisibleInkDustNode.swift
+index 3f373eeee0..a47e32a729 100644
+--- a/submodules/InvisibleInkDustNode/Sources/InvisibleInkDustNode.swift
++++ b/submodules/InvisibleInkDustNode/Sources/InvisibleInkDustNode.swift
+@@ -715,3 +715,43 @@ public class InvisibleInkDustNode: ASDisplayNode {
+         }
+     }
+ }
++
++public extension InvisibleInkDustNode {
++    /// Draws the dust as still dots, the way the non-animated variant shows it, in this node's coordinates.
++    /// A snapshot (`drawHierarchy`) does not capture the animated emitter, so without this the hidden text would
++    /// come out as an empty gap.
++    func drawStaticDust(in context: CGContext) {
++        guard !self.isRevealed, let (_, color, _, lineRects, _) = self.currentParams else {
++            return
++        }
++        var combinedRect: CGRect?
++        var combinedRects: [CGRect] = []
++        for rect in lineRects {
++            if let currentRect = combinedRect {
++                if abs(currentRect.minY - rect.minY) < 1.0 && abs(currentRect.maxY - rect.maxY) < 1.0 {
++                    combinedRect = currentRect.union(rect)
++                } else {
++                    combinedRects.append(currentRect.insetBy(dx: 0.0, dy: -1.0 + UIScreenPixel))
++                    combinedRect = rect
++                }
++            } else {
++                combinedRect = rect
++            }
++        }
++        if let combinedRect {
++            combinedRects.append(combinedRect.insetBy(dx: 0.0, dy: -1.0))
++        }
++
++        var generator = ArbitraryRandomNumberGenerator(seed: 1)
++        context.saveGState()
++        context.setFillColor(color.cgColor)
++        for rect in combinedRects where rect.width > 10.0 {
++            let rate = Int(rect.width * rect.height * 0.25)
++            for _ in 0 ..< rate {
++                let location = CGPoint(x: .random(in: rect.minX ..< rect.maxX, using: &generator), y: .random(in: rect.minY ..< rect.maxY, using: &generator))
++                context.fillEllipse(in: CGRect(origin: location, size: CGSize(width: 1.0, height: 1.0)))
++            }
++        }
++        context.restoreGState()
++    }
++}
+diff --git a/submodules/TelegramUI/BUILD b/submodules/TelegramUI/BUILD
+index 116004c3e5..7d0de01a7e 100644
+--- a/submodules/TelegramUI/BUILD
++++ b/submodules/TelegramUI/BUILD
+@@ -585,6 +585,7 @@ swift_library(
+         "//submodules/TelegramUI/Components/PeerInfo/PeerCopyProtectionInfoScreen",
+         "//submodules/TelegramUI/Components/Chat/ChatRankInfoScreen",
+         "//submodules/TelegramUI/Components/PollStatsScreen",
++        "//submodules/TelegramUI/Components/PostShareImageScreen",
+         "//submodules/TelegramUI/Components/RankChatPreviewItem",
+         "//submodules/TelegramUI/Components/TextProcessingScreen",
+         "//submodules/TelegramUI/Components/CreateBotScreen",
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageAnimatedStickerItemNode/Sources/ChatMessageAnimatedStickerItemNode.swift b/submodules/TelegramUI/Components/Chat/ChatMessageAnimatedStickerItemNode/Sources/ChatMessageAnimatedStickerItemNode.swift
+index 61befa1681..fb23e440f1 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageAnimatedStickerItemNode/Sources/ChatMessageAnimatedStickerItemNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageAnimatedStickerItemNode/Sources/ChatMessageAnimatedStickerItemNode.swift
+@@ -2904,7 +2904,7 @@ public class ChatMessageAnimatedStickerItemNode: ChatMessageItemView {
+                             switch currentSwipeAction {
+                             case .none:
+                                 break
+-                            case .reply:
++                            case .reply, .hideFromScreenshot:
+                                 item.controllerInteraction.setupReply(item.message.id)
+                             }
+                         }
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
+index 50540f7afe..177165ba73 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
+@@ -1007,6 +1007,10 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
+             if strongSelf.selectionNode != nil {
+                 return .none
+             }
++            // The screenshot editor has no message menu: a long press only selects text, without the press scale.
++            if let item = strongSelf.item, item.controllerInteraction.isScreenshotEditor {
++                return .none
++            }
+             if let item = strongSelf.item, item.controllerInteraction.focusedPollAddOptionMessageId != nil {
+                 return .none
+             }
+@@ -5535,6 +5539,9 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
+                     if strongSelf.contentContainers.count < 2 {
+                         return false
+                     }
++                    if let item = strongSelf.item, item.controllerInteraction.isScreenshotEditor {
++                        return false
++                    }
+                     
+                     let location = location.offsetBy(dx: 0.0, dy: strongContainerNode.frame.minY)
+                     if !strongSelf.pressFrame().contains(location) {
+@@ -8197,7 +8204,7 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
+                             switch currentSwipeAction {
+                             case .none:
+                                 break
+-                            case .reply:
++                            case .reply, .hideFromScreenshot:
+                                 item.controllerInteraction.setupReply(item.message.id)
+                             }
+                         }
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageInstantVideoItemNode/Sources/ChatMessageInstantVideoItemNode.swift b/submodules/TelegramUI/Components/Chat/ChatMessageInstantVideoItemNode/Sources/ChatMessageInstantVideoItemNode.swift
+index e2a2a4c2df..49e6e4b700 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageInstantVideoItemNode/Sources/ChatMessageInstantVideoItemNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageInstantVideoItemNode/Sources/ChatMessageInstantVideoItemNode.swift
+@@ -1178,7 +1178,7 @@ public class ChatMessageInstantVideoItemNode: ChatMessageItemView, ASGestureReco
+                             switch currentSwipeAction {
+                             case .none:
+                                 break
+-                            case .reply:
++                            case .reply, .hideFromScreenshot:
+                                 item.controllerInteraction.setupReply(item.message.id)
+                             }
+                         }
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageStickerItemNode/Sources/ChatMessageStickerItemNode.swift b/submodules/TelegramUI/Components/Chat/ChatMessageStickerItemNode/Sources/ChatMessageStickerItemNode.swift
+index de115ffd7f..fc1e608188 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageStickerItemNode/Sources/ChatMessageStickerItemNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageStickerItemNode/Sources/ChatMessageStickerItemNode.swift
+@@ -1872,7 +1872,7 @@ public class ChatMessageStickerItemNode: ChatMessageItemView {
+                             switch currentSwipeAction {
+                             case .none:
+                                 break
+-                            case .reply:
++                            case .reply, .hideFromScreenshot:
+                                 item.controllerInteraction.setupReply(item.message.id)
+                             }
+                         }
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageSwipeToReplyNode/Sources/ChatMessageSwipeToReplyNode.swift b/submodules/TelegramUI/Components/Chat/ChatMessageSwipeToReplyNode/Sources/ChatMessageSwipeToReplyNode.swift
+index f57eab10f6..92486a0826 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageSwipeToReplyNode/Sources/ChatMessageSwipeToReplyNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageSwipeToReplyNode/Sources/ChatMessageSwipeToReplyNode.swift
+@@ -13,6 +13,8 @@ public final class ChatMessageSwipeToReplyNode: ASDisplayNode {
+         case reply
+         case like
+         case unlike
++        /// Hides the message from a screenshot: a crossed-out eye.
++        case hide
+     }
+     
+     private var backgroundContent: WallpaperBubbleBackgroundNode?
+@@ -49,6 +51,17 @@ public final class ChatMessageSwipeToReplyNode: ASDisplayNode {
+                     context.setFillColor(foregroundColor.cgColor)
+                     context.fill(imageRect)
+                 }
++            case .hide:
++                if let image = UIImage(bundleImageName: "Chat/Message/AgeRestricted") {
++                    let imageRect = CGRect(origin: CGPoint(x: floor((size.width - image.size.width) / 2.0), y: floor((size.height - image.size.height) / 2.0)), size: image.size)
++                    
++                    context.translateBy(x: imageRect.midX, y: imageRect.midY)
++                    context.scaleBy(x: 1.0, y: -1.0)
++                    context.translateBy(x: -imageRect.midX, y: -imageRect.midY)
++                    context.clip(to: imageRect, mask: image.cgImage!)
++                    context.setFillColor(foregroundColor.cgColor)
++                    context.fill(imageRect)
++                }
+             case .like, .unlike:
+                 if let image = UIImage(bundleImageName: action == .like ? "Chat/Reactions/SwipeActionHeartFilled" : "Chat/Reactions/SwipeActionHeartBroken") {
+                     let imageRect = CGRect(origin: CGPoint(x: floor((size.width - image.size.width) / 2.0), y: floor((size.height - image.size.height) / 2.0)), size: image.size)
+@@ -221,6 +234,8 @@ public extension ChatMessageSwipeToReplyNode.Action {
+                 self = .reply
+             case .reply:
+                 self = .reply
++            case .hideFromScreenshot:
++                self = .hide
+             }
+         } else {
+             self = .reply
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageTextBubbleContentNode/Sources/ChatMessageTextBubbleContentNode.swift b/submodules/TelegramUI/Components/Chat/ChatMessageTextBubbleContentNode/Sources/ChatMessageTextBubbleContentNode.swift
+index 8652b352c5..94592665ae 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageTextBubbleContentNode/Sources/ChatMessageTextBubbleContentNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageTextBubbleContentNode/Sources/ChatMessageTextBubbleContentNode.swift
+@@ -1679,6 +1679,7 @@ public class ChatMessageTextBubbleContentNode: ChatMessageBubbleContentNode {
+                 }
+                 
+                 textSelectionNode.enableQuote = enableQuote
++                textSelectionNode.enableCutFromScreenshot = item.controllerInteraction.isScreenshotEditor
+                 textSelectionNode.enableTranslate = enableOtherActions
+                 textSelectionNode.enableShare = enableOtherActions && enableCopy
+                 textSelectionNode.menuSkipCoordnateConversion = !enableOtherActions
+@@ -1709,6 +1710,10 @@ public class ChatMessageTextBubbleContentNode: ChatMessageBubbleContentNode {
+         if self.displayContentsUnderSpoilers.value == value {
+             return
+         }
++        if value, let item = self.item, item.controllerInteraction.isScreenshotEditor {
++            // The screenshot editor hides cut text under spoilers; revealing it would put it back into the image.
++            return
++        }
+         self.displayContentsUnderSpoilers = (value, location)
+         if let item = self.item {
+             item.controllerInteraction.requestMessageUpdate(item.message.id, false, nil)
+diff --git a/submodules/TelegramUI/Components/ChatControllerInteraction/Sources/ChatControllerInteraction.swift b/submodules/TelegramUI/Components/ChatControllerInteraction/Sources/ChatControllerInteraction.swift
+index 82a2fed21d..15fddc9a84 100644
+--- a/submodules/TelegramUI/Components/ChatControllerInteraction/Sources/ChatControllerInteraction.swift
++++ b/submodules/TelegramUI/Components/ChatControllerInteraction/Sources/ChatControllerInteraction.swift
+@@ -50,6 +50,9 @@ public struct ChatInterfacePollActionState: Equatable {
+ public enum ChatControllerInteractionSwipeAction {
+     case none
+     case reply
++    /// The screenshot editor: the swipe hides the message from the screenshot (or shows it again), reported
++    /// through `setupReply`.
++    case hideFromScreenshot
+ }
+ 
+ public enum ChatControllerInteractionReaction {
+@@ -348,6 +351,8 @@ public final class ChatControllerInteraction: ChatControllerInteractionProtocol
+     public let displayPollRestrictedToast: (EngineMessage.Id) -> Void
+     
+     public var canPlayMedia: Bool = false
++    /// Set by the screenshot editor: a bubble's text selection offers only "Cut from screenshot".
++    public var isScreenshotEditor: Bool = false
+     public var hiddenMedia: [EngineMessage.Id: [EngineRawMedia]] = [:]
+     public var expandedTranslationMessageStableIds: Set<UInt32> = Set()
+     public var selectionState: ChatInterfaceSelectionState?
+diff --git a/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewScreen.swift b/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewScreen.swift
+index a960aed344..6160b626d1 100644
+--- a/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewScreen.swift
++++ b/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewScreen.swift
+@@ -963,7 +963,7 @@ private final class GiftViewSheetContent: CombinedComponent {
+                         controller.present(translationController, in: .window(.root))
+                     }
+                 })
+-            case .quote:
++            case .quote, .cutFromScreenshot:
+                 break
+             }
+         }
+diff --git a/submodules/TelegramUI/Components/PostShareImageScreen/BUILD b/submodules/TelegramUI/Components/PostShareImageScreen/BUILD
+new file mode 100644
+index 0000000000..153f3a031a
+--- /dev/null
++++ b/submodules/TelegramUI/Components/PostShareImageScreen/BUILD
+@@ -0,0 +1,36 @@
++load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
++
++swift_library(
++    name = "PostShareImageScreen",
++    module_name = "PostShareImageScreen",
++    srcs = glob([
++        "Sources/**/*.swift",
++    ]),
++    copts = [
++        "-warnings-as-errors",
++    ],
++    deps = [
++        "//submodules/AsyncDisplayKit:AsyncDisplayKit",
++        "//submodules/Display",
++        "//submodules/TelegramUIPreferences",
++        "//submodules/TelegramCore",
++        "//submodules/SSignalKit/SwiftSignalKit",
++        "//submodules/ComponentFlow",
++        "//submodules/Components/ViewControllerComponent",
++        "//submodules/Components/MultilineTextComponent",
++        "//submodules/Components/BundleIconComponent",
++        "//submodules/Components/SheetComponent",
++        "//submodules/TelegramPresentationData",
++        "//submodules/AccountContext",
++        "//submodules/WallpaperBackgroundNode",
++        "//submodules/InvisibleInkDustNode",
++        "//submodules/TelegramUI/Components/LottieComponent",
++        "//submodules/TelegramUI/Components/ButtonComponent",
++        "//submodules/TelegramUI/Components/GlassBarButtonComponent",
++        "//submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode",
++        "//submodules/TelegramUI/Components/Chat/ChatMessageTextBubbleContentNode",
++    ],
++    visibility = [
++        "//visibility:public",
++    ],
++)
+diff --git a/submodules/TelegramUI/Components/PostShareImageScreen/Sources/PostShareIcons.swift b/submodules/TelegramUI/Components/PostShareImageScreen/Sources/PostShareIcons.swift
+new file mode 100644
+index 0000000000..66e7e5e43e
+--- /dev/null
++++ b/submodules/TelegramUI/Components/PostShareImageScreen/Sources/PostShareIcons.swift
+@@ -0,0 +1,157 @@
++import Foundation
++import UIKit
++
++/// Vector icons of the share sheet, from the design's SVGs (absolute M/L/H/V/C/Z path data only).
++enum PostShareIcons {
++    static func instagram(color: UIColor) -> UIImage? {
++        return self.image(size: CGSize(width: 18.0, height: 18.0), paths: [instagramOutline, instagramLens, instagramDot], color: color)
++    }
++
++    static func x(color: UIColor) -> UIImage? {
++        return self.image(size: CGSize(width: 18.0, height: 18.0), paths: [xLogo], color: color)
++    }
++
++    static func threads(color: UIColor) -> UIImage? {
++        return self.image(size: CGSize(width: 18.0, height: 18.0), paths: [threadsLogo], color: color)
++    }
++
++    static func reddit(color: UIColor) -> UIImage? {
++        return self.image(size: CGSize(width: 20.0, height: 20.0), paths: [redditLogo], color: color)
++    }
++
++    /// The Telegram plane, 19 x 15 at its natural size.
++    static let telegramLogoSize = CGSize(width: 19.0, height: 15.0)
++
++    static func drawTelegramLogo(in context: CGContext, frame: CGRect, color: UIColor) {
++        guard let path = self.path(telegramLogo) else {
++            return
++        }
++        context.saveGState()
++        context.translateBy(x: frame.minX, y: frame.minY)
++        context.scaleBy(x: frame.width / self.telegramLogoSize.width, y: frame.height / self.telegramLogoSize.height)
++        context.addPath(path)
++        context.setFillColor(color.cgColor)
++        context.fillPath()
++        context.restoreGState()
++    }
++
++    private static func image(size: CGSize, paths: [String], color: UIColor) -> UIImage? {
++        let cgPaths = paths.compactMap { self.path($0) }
++        if cgPaths.count != paths.count {
++            return nil
++        }
++        return UIGraphicsImageRenderer(size: size).image { rendererContext in
++            let context = rendererContext.cgContext
++            context.setFillColor(color.cgColor)
++            for path in cgPaths {
++                context.addPath(path)
++                context.fillPath()
++            }
++        }
++    }
++
++    /// Parses absolute SVG path data (M, L, H, V, C, Z, with implicit repeats). Returns nil on anything else.
++    private static func path(_ data: String) -> CGPath? {
++        let path = CGMutablePath()
++        let scalars = Array(data.unicodeScalars)
++        var index = 0
++        var command: Character?
++        var current = CGPoint()
++
++        func skipSeparators() {
++            while index < scalars.count, scalars[index] == " " || scalars[index] == "," || scalars[index] == "\n" || scalars[index] == "\t" {
++                index += 1
++            }
++        }
++
++        func readNumber() -> CGFloat? {
++            skipSeparators()
++            let start = index
++            if index < scalars.count, scalars[index] == "-" || scalars[index] == "+" {
++                index += 1
++            }
++            var seenPoint = false
++            while index < scalars.count {
++                let scalar = scalars[index]
++                if scalar >= "0" && scalar <= "9" {
++                    index += 1
++                } else if scalar == "." && !seenPoint {
++                    seenPoint = true
++                    index += 1
++                } else {
++                    break
++                }
++            }
++            guard index > start, let value = Double(String(String.UnicodeScalarView(scalars[start ..< index]))) else {
++                return nil
++            }
++            return CGFloat(value)
++        }
++
++        while true {
++            skipSeparators()
++            if index >= scalars.count {
++                break
++            }
++            let scalar = scalars[index]
++            if CharacterSet.letters.contains(scalar) {
++                command = Character(scalar)
++                index += 1
++                if command == "Z" {
++                    path.closeSubpath()
++                    command = nil
++                }
++                continue
++            }
++            switch command {
++            case "M", "L":
++                guard let x = readNumber(), let y = readNumber() else {
++                    return nil
++                }
++                current = CGPoint(x: x, y: y)
++                if command == "M" {
++                    path.move(to: current)
++                    // Further pairs after a moveto are implicit linetos.
++                    command = "L"
++                } else {
++                    path.addLine(to: current)
++                }
++            case "H":
++                guard let x = readNumber() else {
++                    return nil
++                }
++                current = CGPoint(x: x, y: current.y)
++                path.addLine(to: current)
++            case "V":
++                guard let y = readNumber() else {
++                    return nil
++                }
++                current = CGPoint(x: current.x, y: y)
++                path.addLine(to: current)
++            case "C":
++                guard let x1 = readNumber(), let y1 = readNumber(), let x2 = readNumber(), let y2 = readNumber(), let x = readNumber(), let y = readNumber() else {
++                    return nil
++                }
++                current = CGPoint(x: x, y: y)
++                path.addCurve(to: current, control1: CGPoint(x: x1, y: y1), control2: CGPoint(x: x2, y: y2))
++            default:
++                return nil
++            }
++        }
++        return path
++    }
++}
++
++private let instagramOutline = "M9 1.6207C11.4047 1.6207 11.6895 1.63125 12.6352 1.67344C13.5141 1.71211 13.9887 1.85977 14.3051 1.98281C14.7234 2.14453 15.0258 2.34141 15.3387 2.6543C15.6551 2.9707 15.8484 3.26953 16.0102 3.68789C16.1332 4.0043 16.2809 4.48242 16.3195 5.35781C16.3617 6.30703 16.3723 6.5918 16.3723 8.99297C16.3723 11.3977 16.3617 11.6824 16.3195 12.6281C16.2809 13.507 16.1332 13.9816 16.0102 14.298C15.8484 14.7164 15.6516 15.0188 15.3387 15.3316C15.0223 15.648 14.7234 15.8414 14.3051 16.0031C13.9887 16.1262 13.5105 16.2738 12.6352 16.3125C11.6859 16.3547 11.4012 16.3652 9 16.3652C6.59531 16.3652 6.31055 16.3547 5.36484 16.3125C4.48594 16.2738 4.01133 16.1262 3.69492 16.0031C3.27656 15.8414 2.97422 15.6445 2.66133 15.3316C2.34492 15.0152 2.15156 14.7164 1.98984 14.298C1.8668 13.9816 1.71914 13.5035 1.68047 12.6281C1.63828 11.6789 1.62773 11.3941 1.62773 8.99297C1.62773 6.58828 1.63828 6.30352 1.68047 5.35781C1.71914 4.47891 1.8668 4.0043 1.98984 3.68789C2.15156 3.26953 2.34844 2.96719 2.66133 2.6543C2.97773 2.33789 3.27656 2.14453 3.69492 1.98281C4.01133 1.85977 4.48945 1.71211 5.36484 1.67344C6.31055 1.63125 6.59531 1.6207 9 1.6207ZM9 0C6.55664 0 6.25078 0.0105469 5.29102 0.0527344C4.33477 0.0949219 3.67734 0.249609 3.10781 0.471094C2.51367 0.703125 2.01094 1.00898 1.51172 1.51172C1.00898 2.01094 0.703125 2.51367 0.471094 3.1043C0.249609 3.67734 0.0949219 4.33125 0.0527344 5.2875C0.0105469 6.25078 0 6.55664 0 9C0 11.4434 0.0105469 11.7492 0.0527344 12.709C0.0949219 13.6652 0.249609 14.3227 0.471094 14.8922C0.703125 15.4863 1.00898 15.9891 1.51172 16.4883C2.01094 16.9875 2.51367 17.2969 3.1043 17.5254C3.67734 17.7469 4.33125 17.9016 5.2875 17.9438C6.24727 17.9859 6.55312 17.9965 8.99648 17.9965C11.4398 17.9965 11.7457 17.9859 12.7055 17.9438C13.6617 17.9016 14.3191 17.7469 14.8887 17.5254C15.4793 17.2969 15.982 16.9875 16.4813 16.4883C16.9805 15.9891 17.2898 15.4863 17.5184 14.8957C17.7398 14.3227 17.8945 13.6688 17.9367 12.7125C17.9789 11.7527 17.9895 11.4469 17.9895 9.00352C17.9895 6.56016 17.9789 6.2543 17.9367 5.29453C17.8945 4.33828 17.7398 3.68086 17.5184 3.11133C17.2969 2.51367 16.991 2.01094 16.4883 1.51172C15.9891 1.0125 15.4863 0.703125 14.8957 0.474609C14.3227 0.253125 13.6688 0.0984375 12.7125 0.05625C11.7492 0.0105469 11.4434 0 9 0Z"
++
++private let instagramLens = "M9 4.37695C6.44766 4.37695 4.37695 6.44766 4.37695 9C4.37695 11.5523 6.44766 13.623 9 13.623C11.5523 13.623 13.623 11.5523 13.623 9C13.623 6.44766 11.5523 4.37695 9 4.37695ZM9 11.9988C7.34414 11.9988 6.00117 10.6559 6.00117 9C6.00117 7.34414 7.34414 6.00117 9 6.00117C10.6559 6.00117 11.9988 7.34414 11.9988 9C11.9988 10.6559 10.6559 11.9988 9 11.9988Z"
++
++private let instagramDot = "M14.8852 4.19404C14.8852 4.7917 14.4 5.27334 13.8059 5.27334C13.2082 5.27334 12.7266 4.78819 12.7266 4.19404C12.7266 3.59639 13.2117 3.11475 13.8059 3.11475C14.4 3.11475 14.8852 3.5999 14.8852 4.19404Z"
++
++private let xLogo = "M13.7447 1.42798H16.2748L10.7473 7.7456L17.25 16.3425H12.1584L8.17053 11.1285L3.60746 16.3425H1.07582L6.98808 9.58505L0.75 1.42798H5.97083L9.57555 6.19373L13.7447 1.42798ZM12.8567 14.8281H14.2587L5.20905 2.86283H3.7046L12.8567 14.8281Z"
++
++private let threadsLogo = "M13.2691 8.34265C13.1916 8.30549 13.1128 8.26972 13.033 8.23548C12.8941 5.67546 11.4952 4.20984 9.14643 4.19484C9.13579 4.19478 9.1252 4.19478 9.11456 4.19478C7.70966 4.19478 6.54123 4.79446 5.82206 5.88569L7.11384 6.77183C7.65109 5.95672 8.49424 5.78295 9.11518 5.78295C9.12235 5.78295 9.12955 5.78295 9.13665 5.78302C9.91003 5.78795 10.4936 6.01281 10.8713 6.45131C11.1462 6.77056 11.3301 7.21172 11.4211 7.76848C10.7354 7.65194 9.99384 7.61611 9.20109 7.66156C6.96794 7.79019 5.53229 9.09262 5.62871 10.9024C5.67764 11.8204 6.13497 12.6101 6.91641 13.126C7.5771 13.5622 8.42803 13.7754 9.3124 13.7272C10.4803 13.6631 11.3965 13.2175 12.0357 12.4028C12.5212 11.784 12.8282 10.9822 12.9637 9.97181C13.5203 10.3077 13.9328 10.7498 14.1607 11.2811C14.548 12.1844 14.5706 13.6687 13.3595 14.8789C12.2983 15.939 11.0227 16.3976 9.09502 16.4118C6.95664 16.3959 5.33942 15.7102 4.28795 14.3735C3.30333 13.1218 2.79447 11.3139 2.77549 9C2.79447 6.68604 3.30333 4.87815 4.28795 3.6265C5.33942 2.28983 6.95662 1.60406 9.09499 1.58817C11.2489 1.60418 12.8943 2.29326 13.986 3.63637C14.5213 4.29502 14.9249 5.12333 15.191 6.08909L16.7048 5.68521C16.3823 4.49646 15.8748 3.4721 15.1842 2.62256C13.7846 0.900626 11.7377 0.0182951 9.10027 0H9.08971C6.45765 0.0182316 4.43363 0.903919 3.0739 2.63243C1.86393 4.1706 1.23979 6.31085 1.21882 8.99367L1.21875 9L1.21882 9.00633C1.23979 11.6891 1.86393 13.8294 3.0739 15.3676C4.43363 17.0961 6.45765 17.9818 9.08971 18H9.10027C11.4403 17.9838 13.0897 17.3711 14.4486 16.0135C16.2263 14.2374 16.1728 12.0112 15.5869 10.6445C15.1665 9.66441 14.365 8.86839 13.2691 8.34265ZM9.2288 12.1413C8.25005 12.1964 7.23322 11.7571 7.18309 10.8161C7.14593 10.1184 7.67961 9.33994 9.28886 9.2472C9.47316 9.23657 9.654 9.23137 9.83166 9.23137C10.4162 9.23137 10.963 9.28816 11.4602 9.39684C11.2747 11.7127 10.1871 12.0887 9.2288 12.1413Z"
++
++private let redditLogo = "M12.0352 4.71553C12.2086 5.45068 12.8688 5.99834 13.657 5.99834C14.5773 5.99834 15.3234 5.25225 15.3234 4.33193C15.3234 3.41162 14.5773 2.66553 13.657 2.66553C12.8523 2.66553 12.1812 3.23584 12.025 3.99443C10.6773 4.13897 9.625 5.28193 9.625 6.66709C9.625 6.67021 9.625 6.67256 9.625 6.67568C8.15938 6.7374 6.82109 7.15459 5.75859 7.81318C5.36406 7.50771 4.86875 7.32568 4.33125 7.32568C3.04141 7.32568 1.99609 8.371 1.99609 9.66084C1.99609 10.5968 2.54609 11.403 3.34062 11.7757C3.41797 14.4866 6.37187 16.6671 10.0055 16.6671C13.6391 16.6671 16.5969 14.4843 16.6703 11.771C17.4586 11.396 18.0039 10.5921 18.0039 9.66162C18.0039 8.37178 16.9586 7.32646 15.6688 7.32646C15.1336 7.32646 14.6406 7.50693 14.2469 7.81006C13.175 7.14678 11.8219 6.72959 10.3414 6.67412C10.3414 6.67178 10.3414 6.67021 10.3414 6.66787C10.3414 5.67568 11.0789 4.85225 12.0352 4.71709V4.71553ZM5.66484 11.1429C5.70391 10.296 6.26641 9.646 6.92031 9.646C7.57422 9.646 8.07422 10.3327 8.03516 11.1796C7.99609 12.0265 7.50781 12.3343 6.85312 12.3343C6.19844 12.3343 5.62578 11.9897 5.66484 11.1429ZM13.0914 9.646C13.7461 9.646 14.3086 10.296 14.3469 11.1429C14.3859 11.9897 13.8125 12.3343 13.1586 12.3343C12.5047 12.3343 12.0156 12.0272 11.9766 11.1796C11.9375 10.3327 12.4367 9.646 13.0914 9.646ZM12.3133 13.1022C12.4359 13.1147 12.5141 13.2421 12.4664 13.3562C12.0641 14.3179 11.1141 14.9937 10.0055 14.9937C8.89687 14.9937 7.94766 14.3179 7.54453 13.3562C7.49687 13.2421 7.575 13.1147 7.69766 13.1022C8.41641 13.0296 9.19375 12.9897 10.0055 12.9897C10.8172 12.9897 11.5938 13.0296 12.3133 13.1022Z"
++
++private let telegramLogo = "M1.23535 6.44629C3.66113 5.39811 5.68262 4.52214 7.2998 3.81836C8.91699 3.12956 10.1299 2.61296 10.9385 2.26855C12.4958 1.62467 13.6712 1.14551 14.4648 0.831055C15.2734 0.516602 15.8799 0.299479 16.2842 0.179688C16.6436 0.0598958 16.9281 0 17.1377 0H17.1602C17.25 0 17.3473 0.0149739 17.4521 0.0449219C17.5869 0.0748699 17.6992 0.127279 17.7891 0.202148C17.8639 0.262044 17.9238 0.336914 17.9688 0.426758C17.9837 0.486654 18.0062 0.561523 18.0361 0.651367C18.0361 0.711263 18.0436 0.778646 18.0586 0.853516C18.0586 0.943359 18.0586 1.02572 18.0586 1.10059C18.0586 1.14551 18.0586 1.18294 18.0586 1.21289C18.0586 1.24284 18.0586 1.27279 18.0586 1.30273C17.9388 2.48568 17.6618 4.43978 17.2275 7.16504C16.8532 9.42611 16.5013 11.4626 16.1719 13.2744C16.0671 13.8434 15.9023 14.2777 15.6777 14.5771C15.498 14.8167 15.2809 14.9515 15.0264 14.9814C14.9964 14.9814 14.974 14.9814 14.959 14.9814C14.929 14.9814 14.8991 14.9814 14.8691 14.9814C14.6595 14.9814 14.4499 14.944 14.2402 14.8691C14.0456 14.7943 13.8434 14.6969 13.6338 14.5771C13.484 14.4873 13.2819 14.3525 13.0273 14.1729C12.7279 13.9482 12.5182 13.7985 12.3984 13.7236C11.8893 13.3942 11.2604 12.9749 10.5117 12.4658C9.74805 11.9417 9.13411 11.5299 8.66992 11.2305C8.3405 11.0059 8.1084 10.7887 7.97363 10.5791C7.85384 10.3994 7.80892 10.2197 7.83887 10.04C7.86882 9.87533 7.96615 9.69564 8.13086 9.50098C8.2207 9.38118 8.3929 9.2015 8.64746 8.96191C8.7373 8.88704 8.80469 8.82715 8.84961 8.78223C8.92448 8.70736 8.98438 8.63997 9.0293 8.58008C9.05925 8.55013 9.486 8.15332 10.3096 7.38965C11.238 6.53613 11.9492 5.8623 12.4434 5.36816C13.207 4.61947 13.6038 4.19271 13.6338 4.08789C13.6338 4.05794 13.6338 4.02051 13.6338 3.97559C13.6188 3.90072 13.5889 3.84082 13.5439 3.7959C13.499 3.76595 13.4466 3.75098 13.3867 3.75098C13.3418 3.75098 13.2819 3.75846 13.207 3.77344C13.1322 3.78841 12.5107 4.18522 11.3428 4.96387C10.1898 5.71257 8.46777 6.85807 6.17676 8.40039C5.84733 8.63997 5.53288 8.81217 5.2334 8.91699C4.93392 9.02181 4.64941 9.07422 4.37988 9.07422C4.11035 9.07422 3.71354 9.00684 3.18945 8.87207C2.77018 8.76725 2.30599 8.63249 1.79688 8.46777C1.87174 8.49772 1.67708 8.43783 1.21289 8.28809C1.00326 8.21322 0.838542 8.15332 0.71875 8.1084C0.56901 8.0485 0.441732 7.98861 0.336914 7.92871C0.217122 7.86882 0.134766 7.79395 0.0898438 7.7041C0.029948 7.62923 0 7.53939 0 7.43457C0 7.4196 0 7.41211 0 7.41211C0 7.39714 0 7.38216 0 7.36719C0.0149739 7.21745 0.127279 7.06771 0.336914 6.91797C0.54655 6.76823 0.846029 6.611 1.23535 6.44629Z"
+diff --git a/submodules/TelegramUI/Components/PostShareImageScreen/Sources/PostShareImageScreen.swift b/submodules/TelegramUI/Components/PostShareImageScreen/Sources/PostShareImageScreen.swift
+new file mode 100644
+index 0000000000..a0f7e19767
+--- /dev/null
++++ b/submodules/TelegramUI/Components/PostShareImageScreen/Sources/PostShareImageScreen.swift
+@@ -0,0 +1,1358 @@
++import Foundation
++import UIKit
++import AsyncDisplayKit
++import Display
++import ComponentFlow
++import SwiftSignalKit
++import TelegramCore
++import TelegramPresentationData
++import TelegramUIPreferences
++import AccountContext
++import ViewControllerComponent
++import SheetComponent
++import ButtonComponent
++import GlassBarButtonComponent
++import BundleIconComponent
++import MultilineTextComponent
++import LottieComponent
++import WallpaperBackgroundNode
++import InvisibleInkDustNode
++import ChatMessageBubbleItemNode
++import ChatMessageTextBubbleContentNode
++
++/// What the screenshot editor starts from: the bubbles that were on screen, oldest first.
++/// An album is one item of several messages.
++public struct PostShareScreenshotContent {
++    public let items: [[EngineMessage]]
++    /// Called after the share sheet has sent the screenshots and the editor has closed: the chats they went to and
++    /// how many screenshots there were.
++    public let sent: (([EnginePeer.Id], Int) -> Void)?
++
++    public init(items: [[EngineMessage]], sent: (([EnginePeer.Id], Int) -> Void)? = nil) {
++        self.items = items
++        self.sent = sent
++    }
++}
++
++/// A look for the screenshot: the user's own chat look first, then Telegram's chat themes (the ones a chat can be
++/// switched to), each with its bubble colours and its wallpaper.
++private struct PostShareThemeOption {
++    let id: String
++    let theme: PresentationTheme
++    let wallpaper: TelegramWallpaper
++    /// The colours of the picker's circle.
++    let previewColors: [UIColor]
++
++    init(id: String, theme: PresentationTheme, wallpaper: TelegramWallpaper) {
++        self.id = id
++        self.theme = theme
++        self.wallpaper = wallpaper
++
++        var colors: [UInt32] = []
++        switch wallpaper {
++        case let .color(color):
++            colors = [color]
++        case let .gradient(gradient):
++            colors = gradient.colors
++        case let .file(file):
++            colors = file.settings.colors
++        default:
++            break
++        }
++        if colors.isEmpty {
++            self.previewColors = theme.chat.message.outgoing.bubble.withoutWallpaper.fill
++        } else {
++            self.previewColors = colors.map { UIColor(rgb: $0) }
++        }
++    }
++}
++
++/// The image as JPEG, scaled down (never up) so that its longer side is at most `maxPixelSide` pixels.
++private func postShareJpegData(image: UIImage, maxPixelSide: CGFloat, quality: CGFloat) -> (Data, CGSize)? {
++    let pixelSize = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
++    let factor = min(1.0, maxPixelSide / max(pixelSize.width, pixelSize.height))
++    let targetSize = CGSize(width: floor(pixelSize.width * factor), height: floor(pixelSize.height * factor))
++    let format = UIGraphicsImageRendererFormat()
++    format.scale = 1.0
++    format.opaque = true
++    let scaledImage = UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
++        image.draw(in: CGRect(origin: CGPoint(), size: targetSize))
++    }
++    guard let data = scaledImage.jpegData(compressionQuality: quality) else {
++        return nil
++    }
++    return (data, targetSize)
++}
++
++/// The footer's logo: the 19x15 artwork one point taller, at the same proportions.
++private let postShareFooterLogoSize: CGSize = {
++    let artwork = PostShareIcons.telegramLogoSize
++    let height = artwork.height + 1.0
++    return CGSize(width: artwork.width * height / artwork.height, height: height)
++}()
++
++private func postShareTelegramLogo(color: UIColor) -> UIImage {
++    let size = postShareFooterLogoSize
++    return UIGraphicsImageRenderer(size: size).image { rendererContext in
++        PostShareIcons.drawTelegramLogo(in: rendererContext.cgContext, frame: CGRect(origin: CGPoint(), size: size), color: color)
++    }
++}
++
++/// SF Pro Expanded Bold; plain bold before iOS 16.
++private func postShareExpandedFont(size: CGFloat) -> UIFont {
++    if #available(iOS 16.0, *) {
++        return UIFont.systemFont(ofSize: size, weight: .bold, width: .expanded)
++    } else {
++        return UIFont.systemFont(ofSize: size, weight: .bold)
++    }
++}
++
++/// The block with the captured messages, drawn by the chat's own bubble nodes on the chosen chat wallpaper, under
++/// a "Today" date header, with the "Telegram" footer and fades at the edges. Inside the block is a canvas as wide
++/// as the phone's screen, laid out like the chat itself (its text size, its wallpaper scale) and shown scaled down
++/// to the block: the shared images are cut from that canvas unscaled, so they look like real screenshots.
++/// A swipe to the left (the chat's reply swipe, with a crossed-out eye) removes a message; a text selection offers
++/// "Cut from screenshot", which hides the fragment under a spoiler, or shows it again if it is already cut.
++private final class PostShareMessagesView: UIView, UIScrollViewDelegate {
++    private struct Entry {
++        var messages: [EngineMessage]
++        var isHidden: Bool
++    }
++
++    /// The block is this much taller than it is wide.
++    static let extraHeight: CGFloat = 40.0
++    private static let topPadding: CGFloat = 8.0
++    private static let footerBottomInset: CGFloat = 12.0
++    private static let footerHeight: CGFloat = 20.0
++    private static let footerSideInset: CGFloat = 20.0
++    private static let footerSpacing: CGFloat = 12.0
++    private static let fadeHeight: CGFloat = 50.0
++    /// The bottom fade reaches full strength once the content has scrolled this far from the bottom.
++    private static let bottomFadeDistance: CGFloat = 24.0
++
++    private static var bottomPadding: CGFloat {
++        return PostShareMessagesView.footerBottomInset + PostShareMessagesView.footerHeight + PostShareMessagesView.footerSpacing
++    }
++
++    private let context: AccountContext
++    private let presentationData: PresentationData
++    private var themeOption: PostShareThemeOption
++    /// Newest first, as the chat list orders its items: index 0 is the bottom bubble.
++    private var entries: [Entry]
++    /// Cut ranges per message, in UTF-16 offsets of `message.text`.
++    private var cuts: [EngineMessage.Id: [Range<Int>]] = [:]
++    /// Reaction icons resolve through this list; without it a bubble's reactions draw as empty pills.
++    private var availableReactions: AvailableReactions?
++
++    /// The screen-wide canvas everything is laid out in; the block shows it scaled down.
++    private let canvasView = UIView()
++    private var wallpaperNode: WallpaperBackgroundNode
++    private let scrollView = UIScrollView()
++    private let contentView = UIView()
++    /// Chat item nodes are built for the chat's upside-down list (each is turned by 180°); this container turns
++    /// them back the same way the list does, so their own gestures (the reply swipe) move the right way.
++    private let containerNode = ASDisplayNode()
++    private var dateHeaderNode: ListViewItemHeaderNode?
++    private var dateHeaderHeight: CGFloat = 0.0
++    private var dateHeaderTimestamp: Int32?
++    private let topFadeLayer = CAGradientLayer()
++    private let bottomFadeLayer = CAGradientLayer()
++    /// Rounds the block: 32 pt corners with 100% corner smoothing, as in the design.
++    private let cornerMaskLayer = CAShapeLayer()
++    private var cornerMaskSize: CGSize?
++    private let footerTitleLabel = UILabel()
++    private let footerLogoView = UIImageView()
++    /// The view the text selection menu positions itself against.
++    private let menuRootNode = ASDisplayNode()
++    private var itemNodes: [ListViewItemNode] = []
++    private var layoutWidth: CGFloat?
++
++    var present: ((ViewController, Any?) -> Void)?
++    /// Called when the split into screenshots may have changed: a message was removed, or the bubbles were laid
++    /// out again.
++    var screenshotsUpdated: (() -> Void)?
++
++    init(context: AccountContext, content: PostShareScreenshotContent, themeOption: PostShareThemeOption) {
++        self.context = context
++        self.presentationData = context.sharedContext.currentPresentationData.with { $0 }
++        self.themeOption = themeOption
++        self.entries = content.items.reversed().map { Entry(messages: $0, isHidden: false) }
++        self.wallpaperNode = createWallpaperBackgroundNode(context: context, forChatDisplay: true)
++
++        super.init(frame: CGRect())
++
++        self.clipsToBounds = true
++        self.layer.mask = self.cornerMaskLayer
++
++        self.addSubview(self.canvasView)
++        self.canvasView.addSubview(self.wallpaperNode.view)
++
++        self.menuRootNode.isUserInteractionEnabled = false
++        self.canvasView.addSubview(self.menuRootNode.view)
++
++        self.scrollView.showsVerticalScrollIndicator = false
++        self.scrollView.alwaysBounceVertical = true
++        self.scrollView.contentInsetAdjustmentBehavior = .never
++        self.scrollView.delegate = self
++        self.canvasView.addSubview(self.scrollView)
++        self.scrollView.addSubview(self.contentView)
++
++        self.containerNode.transform = CATransform3DMakeRotation(CGFloat.pi, 0.0, 0.0, 1.0)
++        self.contentView.addSubview(self.containerNode.view)
++
++        self.topFadeLayer.startPoint = CGPoint(x: 0.5, y: 0.0)
++        self.topFadeLayer.endPoint = CGPoint(x: 0.5, y: 1.0)
++        self.canvasView.layer.addSublayer(self.topFadeLayer)
++        self.bottomFadeLayer.startPoint = CGPoint(x: 0.5, y: 1.0)
++        self.bottomFadeLayer.endPoint = CGPoint(x: 0.5, y: 0.0)
++        self.bottomFadeLayer.opacity = 0.0
++        self.topFadeLayer.opacity = 0.0
++        self.canvasView.layer.addSublayer(self.bottomFadeLayer)
++
++        self.footerTitleLabel.isUserInteractionEnabled = false
++        self.canvasView.addSubview(self.footerTitleLabel)
++        self.footerLogoView.isUserInteractionEnabled = false
++        self.canvasView.addSubview(self.footerLogoView)
++
++        self.applyThemeAppearance()
++    }
++
++    required init?(coder: NSCoder) {
++        fatalError("init(coder:) has not been implemented")
++    }
++
++    private func applyThemeAppearance() {
++        let theme = self.themeOption.theme
++        self.wallpaperNode.update(wallpaper: self.themeOption.wallpaper, animated: false)
++        self.wallpaperNode.updateBubbleTheme(bubbleTheme: theme, bubbleCorners: self.presentationData.chatBubbleCorners)
++
++        // The footer takes the colour of the theme's incoming bubbles, the fades that of the user's own (outgoing)
++        // ones, all as drawn over a wallpaper.
++        let bubbleColor = theme.chat.message.incoming.bubble.withWallpaper.fill.first ?? .white
++        let fadeColor = (theme.chat.message.outgoing.bubble.withWallpaper.fill.first ?? bubbleColor).withAlphaComponent(1.0)
++        let fadeColors = [fadeColor.withAlphaComponent(0.6).cgColor, fadeColor.withAlphaComponent(0.0).cgColor]
++        CATransaction.begin()
++        CATransaction.setDisableActions(true)
++        self.topFadeLayer.colors = fadeColors
++        self.bottomFadeLayer.colors = fadeColors
++        CATransaction.commit()
++
++        let footerColor = bubbleColor
++        self.footerTitleLabel.attributedText = NSAttributedString(string: "Telegram", attributes: [
++            .font: postShareExpandedFont(size: 13.0),
++            .kern: -0.6 as NSNumber,
++            .foregroundColor: footerColor
++        ])
++        self.footerLogoView.image = postShareTelegramLogo(color: footerColor)
++    }
++
++    func updateThemeOption(_ themeOption: PostShareThemeOption) {
++        guard self.themeOption.id != themeOption.id else {
++            return
++        }
++        self.themeOption = themeOption
++
++        // A fresh wallpaper node: one reused across themes kept the previous theme's gradient (bubble backdrops
++        // and pattern) when switching between day and night.
++        let previousWallpaperNode = self.wallpaperNode
++        let wallpaperNode = createWallpaperBackgroundNode(context: self.context, forChatDisplay: true)
++        wallpaperNode.frame = CGRect(origin: CGPoint(), size: PostShareMessagesView.wallpaperSize)
++        wallpaperNode.updateLayout(size: PostShareMessagesView.wallpaperSize, displayMode: .aspectFill, transition: .immediate)
++        self.canvasView.insertSubview(wallpaperNode.view, aboveSubview: previousWallpaperNode.view)
++        previousWallpaperNode.view.removeFromSuperview()
++        self.wallpaperNode = wallpaperNode
++
++        // A text bubble's selection layer takes its colours once, when it is made: drop it, so the relayout's
++        // `activateTextSelection()` makes it again in the new theme's selection colours.
++        self.forEachTextContentNode { $0.updateIsExtractedToContextPreview(false) }
++
++        self.applyThemeAppearance()
++        self.relayoutItems()
++    }
++
++    func updateAvailableReactions(_ availableReactions: AvailableReactions?) {
++        self.availableReactions = availableReactions
++        self.relayoutItems()
++    }
++
++    private func relayoutItems() {
++        guard let width = self.layoutWidth else {
++            return
++        }
++        self.updateItemNodes(width: width)
++        self.layoutContent(visibleIndices: nil, distanceFromBottom: self.currentDistanceFromBottom)
++        self.screenshotsUpdated?()
++    }
++
++    // MARK: - Items
++
++    /// The chat's own text size: the canvas is a screen, and the block's scaling makes the text a little smaller.
++    private var fontSize: PresentationFontSize {
++        return self.presentationData.chatFontSize
++    }
++
++    /// The longer side of the largest photo Telegram sends.
++    fileprivate static let maxPhotoPixelSide: CGFloat = 2560.0
++
++    /// The wallpaper is a portrait screen in size; the canvas, never taller, crops it from the top.
++    fileprivate static var wallpaperSize: CGSize {
++        return PostShareMessagesView.screenSize
++    }
++
++    /// The canvas is as wide as the screen in portrait, and an image is at most as tall as the screen.
++    private static var screenSize: CGSize {
++        let size = UIScreen.main.bounds.size
++        return CGSize(width: min(size.width, size.height), height: max(size.width, size.height))
++    }
++
++    private func applyingCuts(_ message: EngineMessage) -> EngineMessage {
++        guard let ranges = self.cuts[message.id], !ranges.isEmpty else {
++            return message
++        }
++        var entities: [MessageTextEntity] = []
++        for attribute in message.attributes {
++            if let attribute = attribute as? TextEntitiesMessageAttribute {
++                entities = attribute.entities
++            }
++        }
++        for range in ranges {
++            entities.append(MessageTextEntity(range: range, type: .Spoiler))
++        }
++        var attributes = message.attributes.filter { !($0 is TextEntitiesMessageAttribute) }
++        attributes.append(TextEntitiesMessageAttribute(entities: entities))
++        return EngineMessage(message._asMessage().withUpdatedAttributes(attributes))
++    }
++
++    private func makeItems() -> [ListViewItem] {
++        let presentationData = self.presentationData
++        let fontSize = self.fontSize
++        let hooks = ChatScreenshotMessageItemHooks(
++            rootNode: { [weak self] in
++                return self?.menuRootNode
++            },
++            present: { [weak self] controller, arguments in
++                self?.present?(controller, arguments)
++            },
++            cutText: { [weak self] messageId, range in
++                self?.cut(messageId: messageId, range: range)
++            },
++            toggleHidden: { [weak self] messageId in
++                self?.hide(messageId: messageId)
++            }
++        )
++        return self.entries.map { entry in
++            return self.context.sharedContext.makeChatScreenshotMessageItem(
++                context: self.context,
++                messages: entry.messages.map(self.applyingCuts),
++                theme: self.themeOption.theme,
++                strings: presentationData.strings,
++                wallpaper: self.themeOption.wallpaper,
++                fontSize: fontSize,
++                chatBubbleCorners: presentationData.chatBubbleCorners,
++                dateTimeFormat: presentationData.dateTimeFormat,
++                nameOrder: presentationData.nameDisplayOrder,
++                // Gradient and wallpaper-tinted bubbles take their fill from the wallpaper node, as in the chat.
++                backgroundNode: self.wallpaperNode,
++                availableReactions: self.availableReactions,
++                accountPeer: nil,
++                hooks: hooks
++            )
++        }
++    }
++
++    private func updateItemNodes(width: CGFloat) {
++        let items = self.makeItems()
++        let params = ListViewItemLayoutParams(width: width, leftInset: 0.0, rightInset: 0.0, availableHeight: 1000.0)
++        for i in 0 ..< items.count {
++            let neighbors = ListViewItemNeighbors(previous: i == 0 ? nil : items[i - 1].neighborDescriptor, next: i == items.count - 1 ? nil : items[i + 1].neighborDescriptor)
++            if i < self.itemNodes.count {
++                let itemNode = self.itemNodes[i]
++                items[i].updateNode(async: { $0() }, node: {
++                    return itemNode
++                }, params: params, neighbors: neighbors, animation: .None, completion: { layout, apply in
++                    itemNode.contentSize = layout.contentSize
++                    itemNode.insets = layout.insets
++                    itemNode.frame = CGRect(origin: itemNode.frame.origin, size: CGSize(width: width, height: layout.size.height))
++                    apply(ListViewItemApply())
++                })
++            } else {
++                var createdNode: ListViewItemNode?
++                items[i].nodeConfiguredForParams(async: { $0() }, params: params, synchronousLoads: true, neighbors: neighbors, completion: { node, apply in
++                    createdNode = node
++                    apply().1(ListViewItemApply())
++                })
++                if let itemNode = createdNode {
++                    self.containerNode.addSubnode(itemNode)
++                    self.itemNodes.append(itemNode)
++                }
++            }
++        }
++        self.updateDateHeader(timestamp: self.oldestTimestamp(indices: nil))
++        self.activateTextSelection()
++    }
++
++    /// The timestamp of the oldest shown message, for the date header ("Today" for today's).
++    private func oldestTimestamp(indices: [Int]?) -> Int32? {
++        let candidates = indices ?? Array(self.entries.indices)
++        var result: Int32?
++        for index in candidates where index < self.entries.count && !self.entries[index].isHidden {
++            for message in self.entries[index].messages {
++                result = min(result ?? message.timestamp, message.timestamp)
++            }
++        }
++        return result
++    }
++
++    /// The chat's date header ("Today"), above the oldest message.
++    private func updateDateHeader(timestamp: Int32?) {
++        guard let timestamp, let width = self.layoutWidth else {
++            self.dateHeaderNode?.isHidden = true
++            self.dateHeaderHeight = 0.0
++            return
++        }
++        let presentationData = self.presentationData
++        let headerItem = self.context.sharedContext.makeChatMessageDateHeaderItem(context: self.context, timestamp: timestamp, theme: self.themeOption.theme, strings: presentationData.strings, wallpaper: self.themeOption.wallpaper, fontSize: self.fontSize, chatBubbleCorners: presentationData.chatBubbleCorners, dateTimeFormat: presentationData.dateTimeFormat, nameOrder: presentationData.nameDisplayOrder)
++        let headerNode: ListViewItemHeaderNode
++        if let current = self.dateHeaderNode {
++            headerNode = current
++            headerItem.updateNode(headerNode, previous: nil, next: headerItem)
++        } else {
++            headerNode = headerItem.node(synchronousLoad: true)
++            self.containerNode.addSubnode(headerNode)
++            self.dateHeaderNode = headerNode
++        }
++        headerNode.isHidden = false
++        self.dateHeaderTimestamp = timestamp
++        self.dateHeaderHeight = headerItem.height
++        headerNode.frame = CGRect(origin: headerNode.frame.origin, size: CGSize(width: width, height: headerItem.height))
++        headerNode.updateLayout(size: headerNode.bounds.size, leftInset: 0.0, rightInset: 0.0, transition: .immediate)
++    }
++
++    /// Text bubbles create their selection layer only while "extracted" to a context preview, as in the chat's
++    /// message menu; here it is on for good, so a long press on any text starts a selection.
++    private func activateTextSelection() {
++        self.forEachTextContentNode { $0.updateIsExtractedToContextPreview(true) }
++    }
++
++    private func forEachTextContentNode(_ f: (ChatMessageTextBubbleContentNode) -> Void) {
++        for itemNode in self.itemNodes {
++            guard let bubbleNode = itemNode as? ChatMessageBubbleItemNode else {
++                continue
++            }
++            for contentNode in bubbleNode.contentNodes {
++                if let textNode = contentNode as? ChatMessageTextBubbleContentNode {
++                    f(textNode)
++                }
++            }
++        }
++    }
++
++    // MARK: - Layout
++
++    /// Stacks the bubbles bottom-up, then the date header, and returns the content height. With `visibleIndices`
++    /// only those bubbles are laid out (one exported screenshot). Removed messages never are.
++    private func layoutItemNodes(width: CGFloat, visibleIndices: Set<Int>?) -> CGFloat {
++        var y = PostShareMessagesView.bottomPadding
++        for (index, itemNode) in self.itemNodes.enumerated() {
++            let isHidden = index >= self.entries.count || self.entries[index].isHidden
++            if isHidden || (visibleIndices.flatMap { !$0.contains(index) } ?? false) {
++                itemNode.isHidden = true
++                continue
++            }
++            itemNode.isHidden = false
++            itemNode.alpha = 1.0
++            itemNode.frame = CGRect(origin: CGPoint(x: 0.0, y: y), size: CGSize(width: width, height: itemNode.frame.height))
++            y += itemNode.frame.height
++        }
++        if let dateHeaderNode = self.dateHeaderNode, !dateHeaderNode.isHidden {
++            dateHeaderNode.frame = CGRect(origin: CGPoint(x: 0.0, y: y), size: CGSize(width: width, height: self.dateHeaderHeight))
++            y += self.dateHeaderHeight
++        }
++        y += PostShareMessagesView.topPadding
++
++        let contentSize = CGSize(width: width, height: y)
++        self.containerNode.bounds = CGRect(origin: CGPoint(), size: contentSize)
++        self.containerNode.position = CGPoint(x: contentSize.width / 2.0, y: contentSize.height / 2.0)
++        return y
++    }
++
++    private var currentDistanceFromBottom: CGFloat {
++        return max(0.0, self.scrollView.contentSize.height - self.scrollView.contentOffset.y - self.scrollView.bounds.height)
++    }
++
++    /// Lays the messages out in the block; short content sits at the bottom, as in a chat. The bubbles end up
++    /// `distanceFromBottom` above where they would rest at the bottom.
++    private func layoutContent(visibleIndices: Set<Int>?, distanceFromBottom: CGFloat) {
++        let size = self.canvasView.bounds.size
++        let contentHeight = self.layoutItemNodes(width: size.width, visibleIndices: visibleIndices)
++        let offset = max(0.0, size.height - contentHeight)
++        self.contentView.frame = CGRect(origin: CGPoint(x: 0.0, y: offset), size: CGSize(width: size.width, height: contentHeight))
++        let scrollHeight = max(size.height, contentHeight)
++        self.scrollView.contentSize = CGSize(width: size.width, height: scrollHeight)
++        self.scrollView.contentOffset = CGPoint(x: 0.0, y: max(0.0, scrollHeight - size.height - distanceFromBottom))
++        self.updateAbsoluteRects()
++        self.updateBottomFade()
++    }
++
++    /// Tells each bubble where it is over the wallpaper, so a gradient bubble draws its own slice of the gradient.
++    /// Bubbles take the rect as the chat's upside-down list reports it: measured from the bottom of the wallpaper.
++    private func updateAbsoluteRects() {
++        let blockSize = PostShareMessagesView.wallpaperSize
++        let contentHeight = self.containerNode.bounds.height
++        let contentTop = self.contentView.frame.minY - self.scrollView.contentOffset.y
++        for itemNode in self.itemNodes where !itemNode.isHidden {
++            let frame = itemNode.frame
++            let visualTop = contentTop + contentHeight - frame.maxY
++            let rect = CGRect(x: frame.minX, y: blockSize.height - visualTop - frame.height, width: frame.width, height: frame.height)
++            itemNode.updateAbsoluteRect(rect, within: blockSize)
++        }
++    }
++
++    /// The fades show only where there are messages to fade: at the top once a message is cut off above, at the
++    /// bottom once the messages scroll up under the footer.
++    private func updateBottomFade() {
++        let distanceFromTop = self.scrollView.contentOffset.y - self.contentView.frame.minY
++        let topOpacity = Float(max(0.0, min(1.0, distanceFromTop / PostShareMessagesView.bottomFadeDistance)))
++        let bottomOpacity = Float(min(1.0, self.currentDistanceFromBottom / PostShareMessagesView.bottomFadeDistance))
++        if self.topFadeLayer.opacity != topOpacity || self.bottomFadeLayer.opacity != bottomOpacity {
++            CATransaction.begin()
++            CATransaction.setDisableActions(true)
++            self.topFadeLayer.opacity = topOpacity
++            self.bottomFadeLayer.opacity = bottomOpacity
++            CATransaction.commit()
++        }
++    }
++
++    func scrollViewDidScroll(_ scrollView: UIScrollView) {
++        self.updateAbsoluteRects()
++        self.updateBottomFade()
++    }
++
++    /// Everything on the canvas but the bubbles: wallpaper, scroll area, fades and footer, for a canvas of `size`.
++    private func layoutChrome(size: CGSize) {
++        let bounds = CGRect(origin: CGPoint(), size: size)
++        // The wallpaper is laid out once, at the screen's size from the canvas top, as behind a real chat; the
++        // canvas only crops it. Resizing it for each exported image stretched its pattern and gradient: they
++        // redraw asynchronously, so the capture got the previous size's drawing scaled to the new one.
++        let wallpaperFrame = CGRect(origin: CGPoint(), size: PostShareMessagesView.wallpaperSize)
++        if self.wallpaperNode.frame != wallpaperFrame {
++            self.wallpaperNode.frame = wallpaperFrame
++            self.wallpaperNode.updateLayout(size: wallpaperFrame.size, displayMode: .aspectFill, transition: .immediate)
++        }
++        self.menuRootNode.frame = bounds
++        self.scrollView.frame = bounds
++
++        CATransaction.begin()
++        CATransaction.setDisableActions(true)
++        self.topFadeLayer.frame = CGRect(x: 0.0, y: 0.0, width: size.width, height: PostShareMessagesView.fadeHeight)
++        self.bottomFadeLayer.frame = CGRect(x: 0.0, y: size.height - PostShareMessagesView.fadeHeight, width: size.width, height: PostShareMessagesView.fadeHeight)
++        CATransaction.commit()
++
++        let footerY = size.height - PostShareMessagesView.footerBottomInset - PostShareMessagesView.footerHeight
++        let titleSize = self.footerTitleLabel.sizeThatFits(CGSize(width: size.width, height: PostShareMessagesView.footerHeight))
++        self.footerTitleLabel.frame = CGRect(x: PostShareMessagesView.footerSideInset, y: footerY + floor((PostShareMessagesView.footerHeight - titleSize.height) / 2.0), width: titleSize.width, height: titleSize.height)
++        let logoSize = postShareFooterLogoSize
++        self.footerLogoView.frame = CGRect(x: size.width - PostShareMessagesView.footerSideInset - logoSize.width, y: footerY + floor((PostShareMessagesView.footerHeight - logoSize.height) / 2.0), width: logoSize.width, height: logoSize.height)
++    }
++
++    func update(size: CGSize) {
++        if self.cornerMaskSize != size {
++            self.cornerMaskSize = size
++            CATransaction.begin()
++            CATransaction.setDisableActions(true)
++            self.cornerMaskLayer.frame = CGRect(origin: CGPoint(), size: size)
++            self.cornerMaskLayer.path = postShareSmoothRoundedRectPath(size: size, cornerRadius: 32.0, smoothing: 1.0).cgPath
++            CATransaction.commit()
++        }
++
++        // The canvas is screen-wide; the block scales it down to its own width.
++        let canvasWidth = PostShareMessagesView.screenSize.width
++        let scale = size.width / canvasWidth
++        let canvasSize = CGSize(width: canvasWidth, height: floor(size.height / scale))
++        self.canvasView.transform = .identity
++        self.canvasView.bounds = CGRect(origin: CGPoint(), size: canvasSize)
++        self.canvasView.center = CGPoint(x: size.width / 2.0, y: size.height / 2.0)
++        self.canvasView.transform = CGAffineTransform(scaleX: scale, y: scale)
++        self.layoutChrome(size: canvasSize)
++
++        if self.layoutWidth != canvasWidth {
++            self.layoutWidth = canvasWidth
++            self.updateItemNodes(width: canvasWidth)
++            self.layoutContent(visibleIndices: nil, distanceFromBottom: 0.0)
++            self.screenshotsUpdated?()
++        } else {
++            self.layoutContent(visibleIndices: nil, distanceFromBottom: self.currentDistanceFromBottom)
++        }
++    }
++
++    // MARK: - Editing
++
++    /// A swipe to the left (the chat's reply swipe) removes the bubble from the block and from the screenshots.
++    private func hide(messageId: EngineMessage.Id) {
++        guard let index = self.entries.firstIndex(where: { $0.messages.contains(where: { $0.id == messageId }) }), index < self.itemNodes.count, !self.entries[index].isHidden else {
++            return
++        }
++        self.entries[index].isHidden = true
++        let itemNode = self.itemNodes[index]
++        let distanceFromBottom = self.currentDistanceFromBottom
++        UIView.animate(withDuration: 0.2, animations: {
++            itemNode.alpha = 0.0
++        }, completion: { [weak self] _ in
++            guard let self else {
++                return
++            }
++            self.updateDateHeader(timestamp: self.oldestTimestamp(indices: nil))
++            UIView.animate(withDuration: 0.25, animations: {
++                self.layoutContent(visibleIndices: nil, distanceFromBottom: distanceFromBottom)
++            })
++            self.screenshotsUpdated?()
++        })
++    }
++
++    /// Cuts the selected text out (a spoiler); cutting text that is already cut shows it again.
++    private func cut(messageId: EngineMessage.Id, range: Range<Int>) {
++        guard !range.isEmpty, self.layoutWidth != nil else {
++            return
++        }
++        var ranges = self.cuts[messageId] ?? []
++        if ranges.contains(where: { $0.overlaps(range) }) {
++            ranges.removeAll(where: { $0.overlaps(range) })
++        } else {
++            ranges.append(range)
++        }
++        self.cuts[messageId] = ranges
++        self.relayoutItems()
++    }
++
++    // MARK: - Export
++
++    /// The messages that are left, oldest first, split into screenshots: each takes as many bubbles as fit on one
++    /// screen between its date header and its footer. Entry indices; a bubble taller than the screen gets one of
++    /// its own.
++    func screenshotGroups() -> [[Int]] {
++        let availableHeight = PostShareMessagesView.screenSize.height - PostShareMessagesView.bottomPadding - PostShareMessagesView.topPadding - self.dateHeaderHeight
++        var groups: [[Int]] = []
++        var current: [Int] = []
++        var currentHeight: CGFloat = 0.0
++        for index in (0 ..< min(self.entries.count, self.itemNodes.count)).reversed() where !self.entries[index].isHidden {
++            let itemHeight = self.itemNodes[index].frame.height
++            if !current.isEmpty && currentHeight + itemHeight > availableHeight {
++                groups.append(current)
++                current = []
++                currentHeight = 0.0
++            }
++            current.append(index)
++            currentHeight += itemHeight
++        }
++        if !current.isEmpty {
++            groups.append(current)
++        }
++        return groups
++    }
++
++    /// The images to share, one per screenshot group, cut from the canvas unscaled at the screen's scale: as wide
++    /// as the screen and as tall as their messages (at most the screen), without the fades and the rounded corners.
++    func renderImages() -> [UIImage] {
++        let groups = self.screenshotGroups()
++        guard !groups.isEmpty, let width = self.layoutWidth else {
++            return []
++        }
++        self.forEachTextContentNode { $0.resignTextSelection() }
++
++        // The canvas is laid out at each image's size while it is captured; a still copy of the window hides that.
++        var coverView: UIView?
++        if let window = self.window, let snapshotView = window.snapshotView(afterScreenUpdates: false) {
++            window.addSubview(snapshotView)
++            coverView = snapshotView
++        }
++
++        let canvasBounds = self.canvasView.bounds
++        let canvasTransform = self.canvasView.transform
++        let distanceFromBottom = self.currentDistanceFromBottom
++        let headerTimestamp = self.dateHeaderTimestamp
++
++        // The fades are bare layers: without disabling actions their hiding would animate, and the capture would
++        // still see them.
++        CATransaction.begin()
++        CATransaction.setDisableActions(true)
++        self.topFadeLayer.isHidden = true
++        self.bottomFadeLayer.isHidden = true
++        CATransaction.commit()
++        self.layer.mask = nil
++        self.clipsToBounds = false
++        self.canvasView.transform = .identity
++        defer {
++            self.canvasView.bounds = canvasBounds
++            self.canvasView.transform = canvasTransform
++            self.layoutChrome(size: canvasBounds.size)
++            self.layer.mask = self.cornerMaskLayer
++            self.clipsToBounds = true
++            CATransaction.begin()
++            CATransaction.setDisableActions(true)
++            self.topFadeLayer.isHidden = false
++            self.bottomFadeLayer.isHidden = false
++            CATransaction.commit()
++            self.updateDateHeader(timestamp: headerTimestamp)
++            self.layoutContent(visibleIndices: nil, distanceFromBottom: distanceFromBottom)
++            coverView?.removeFromSuperview()
++        }
++
++        var images: [UIImage] = []
++        for group in groups {
++            self.updateDateHeader(timestamp: self.oldestTimestamp(indices: group))
++            let contentHeight = self.layoutItemNodes(width: width, visibleIndices: Set(group))
++            let imageSize = CGSize(width: width, height: min(PostShareMessagesView.screenSize.height, ceil(contentHeight)))
++            // Up to twice the screen's resolution, within the 2560 px a Telegram photo keeps on its longer side.
++            let format = UIGraphicsImageRendererFormat()
++            format.scale = max(UIScreen.main.scale, min(UIScreen.main.scale * 2.0, PostShareMessagesView.maxPhotoPixelSide / max(imageSize.width, imageSize.height)))
++            format.opaque = true
++            self.canvasView.bounds = CGRect(origin: CGPoint(), size: imageSize)
++            self.layoutChrome(size: imageSize)
++            self.layoutContent(visibleIndices: Set(group), distanceFromBottom: 0.0)
++            let bounds = CGRect(origin: CGPoint(), size: imageSize)
++            images.append(UIGraphicsImageRenderer(bounds: bounds, format: format).image { rendererContext in
++                self.canvasView.drawHierarchy(in: bounds, afterScreenUpdates: true)
++                self.drawSpoilerDust(in: rendererContext.cgContext)
++            })
++        }
++        return images
++    }
++
++    /// Spoilers animate their dust with an emitter that a snapshot does not capture; draw it still on top.
++    private func drawSpoilerDust(in context: CGContext) {
++        var dustNodes: [InvisibleInkDustNode] = []
++        func collect(_ view: UIView) {
++            if view.isHidden || view.alpha <= 0.01 {
++                return
++            }
++            if let dustNode = view.asyncdisplaykit_node as? InvisibleInkDustNode {
++                dustNodes.append(dustNode)
++                return
++            }
++            for subview in view.subviews {
++                collect(subview)
++            }
++        }
++        collect(self.contentView)
++
++        for dustNode in dustNodes {
++            // The chat's flips cancel out along the way, so a converted rect keeps the node's orientation.
++            let frame = dustNode.view.convert(dustNode.view.bounds, to: self.canvasView)
++            if !frame.intersects(self.canvasView.bounds) {
++                continue
++            }
++            context.saveGState()
++            context.translateBy(x: frame.minX, y: frame.minY)
++            dustNode.drawStaticDust(in: context)
++            context.restoreGState()
++        }
++    }
++}
++
++private final class PostShareColorButton: UIControl {
++    private let ringLayer = CAShapeLayer()
++    private let gradientLayer = CAGradientLayer()
++    var action: (() -> Void)?
++
++    static let size = CGSize(width: 40.0, height: 40.0)
++
++    override init(frame: CGRect) {
++        super.init(frame: frame)
++
++        self.ringLayer.fillColor = UIColor.clear.cgColor
++        self.ringLayer.lineWidth = 2.0
++        self.gradientLayer.startPoint = CGPoint(x: 0.0, y: 0.0)
++        self.gradientLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
++        self.gradientLayer.masksToBounds = true
++
++        self.layer.addSublayer(self.gradientLayer)
++        self.layer.addSublayer(self.ringLayer)
++
++        self.addTarget(self, action: #selector(self.pressed), for: .touchUpInside)
++    }
++
++    required init?(coder: NSCoder) {
++        fatalError("init(coder:) has not been implemented")
++    }
++
++    @objc private func pressed() {
++        self.action?()
++    }
++
++    func update(colors: [UIColor], isSelected: Bool, accentColor: UIColor) {
++        let size = PostShareColorButton.size
++        self.ringLayer.frame = CGRect(origin: .zero, size: size)
++        self.ringLayer.path = UIBezierPath(ovalIn: CGRect(origin: .zero, size: size).insetBy(dx: 1.0, dy: 1.0)).cgPath
++        self.ringLayer.strokeColor = accentColor.cgColor
++        self.ringLayer.isHidden = !isSelected
++
++        let inset: CGFloat = isSelected ? 4.0 : 2.0
++        let gradientFrame = CGRect(origin: .zero, size: size).insetBy(dx: inset, dy: inset)
++        self.gradientLayer.frame = gradientFrame
++        self.gradientLayer.cornerRadius = gradientFrame.width / 2.0
++        let cgColors = colors.map { $0.cgColor }
++        self.gradientLayer.colors = cgColors.count == 1 ? [cgColors[0], cgColors[0]] : cgColors
++    }
++}
++
++private final class PostShareSheetContentComponent: Component {
++    typealias EnvironmentType = ViewControllerComponentContainer.Environment
++
++    let context: AccountContext
++    let content: PostShareScreenshotContent
++    let dismiss: () -> Void
++
++    init(context: AccountContext, content: PostShareScreenshotContent, dismiss: @escaping () -> Void) {
++        self.context = context
++        self.content = content
++        self.dismiss = dismiss
++    }
++
++    static func ==(lhs: PostShareSheetContentComponent, rhs: PostShareSheetContentComponent) -> Bool {
++        return lhs.context === rhs.context
++    }
++
++    final class View: UIView {
++        private let closeButton = ComponentView<Empty>()
++        private let appearanceButton = ComponentView<Empty>()
++        private let appearanceButtonPlayOnce = ActionSlot<Void>()
++        private let title = ComponentView<Empty>()
++        private var messagesView: PostShareMessagesView?
++        private let colorsView = UIScrollView()
++        private var colorButtons: [PostShareColorButton] = []
++        private let separatorView = UIView()
++        private let shareButton = ComponentView<Empty>()
++
++        private var component: PostShareSheetContentComponent?
++        private var environment: EnvironmentType?
++        private weak var state: EmptyComponentState?
++
++        private var themeOptions: [PostShareThemeOption] = []
++        private var cloudThemes: [TelegramTheme] = []
++        private var selectedThemeIndex: Int = 0
++        /// Day or night variants of the themes, switched by the moon button; starts as the app's appearance.
++        private var isDarkAppearance = false
++        private var themesDisposable: Disposable?
++        private var reactionsDisposable: Disposable?
++        private var screenshotCount = 1
++        private var screenshotMessageCount = 0
++        /// True while `update` runs: cached themes arrive synchronously inside it, and requesting another update
++        /// from there trips ComponentFlow's re-entrancy precondition.
++        private var isUpdatingLayout = false
++
++        override init(frame: CGRect) {
++            super.init(frame: frame)
++
++            self.colorsView.showsHorizontalScrollIndicator = false
++            self.addSubview(self.colorsView)
++
++            self.addSubview(self.separatorView)
++        }
++
++        required init?(coder: NSCoder) {
++            fatalError("init(coder:) has not been implemented")
++        }
++
++        deinit {
++            self.themesDisposable?.dispose()
++            self.reactionsDisposable?.dispose()
++        }
++
++        private func loadData(context: AccountContext) {
++            let presentationData = context.sharedContext.currentPresentationData.with { $0 }
++            self.isDarkAppearance = presentationData.theme.overallDarkAppearance
++            self.rebuildThemeOptions(context: context)
++
++            self.themesDisposable = (context.engine.themes.getChatThemes(accountManager: context.sharedContext.accountManager)
++            |> take(1)
++            |> deliverOnMainQueue).startStrict(next: { [weak self] themes in
++                guard let self else {
++                    return
++                }
++                self.cloudThemes = themes
++                self.rebuildThemeOptions(context: context)
++                if !self.isUpdatingLayout {
++                    self.state?.updated(transition: .immediate)
++                }
++            })
++
++            self.reactionsDisposable = (context.engine.stickers.availableReactions()
++            |> take(1)
++            |> deliverOnMainQueue).startStrict(next: { [weak self] availableReactions in
++                self?.messagesView?.updateAvailableReactions(availableReactions)
++            })
++        }
++
++        /// The user's own chat look, then the chat themes, all in the current day or night variant. In the
++        /// variant opposite to the app's, the user's own look is the default theme of that variant.
++        private func rebuildThemeOptions(context: AccountContext) {
++            let presentationData = context.sharedContext.currentPresentationData.with { $0 }
++            let isDark = self.isDarkAppearance
++            let variant = isDark ? "night" : "day"
++
++            var options: [PostShareThemeOption] = []
++            if presentationData.theme.overallDarkAppearance == isDark {
++                options.append(PostShareThemeOption(id: "current-\(variant)", theme: presentationData.theme, wallpaper: presentationData.chatWallpaper))
++            } else {
++                let theme = isDark ? defaultDarkColorPresentationTheme : defaultPresentationTheme
++                options.append(PostShareThemeOption(id: "current-\(variant)", theme: theme, wallpaper: theme.chat.defaultWallpaper))
++            }
++            for cloudTheme in self.cloudThemes {
++                guard let theme = makePresentationTheme(cloudTheme: cloudTheme, dark: isDark) else {
++                    continue
++                }
++                options.append(PostShareThemeOption(id: "\(cloudTheme.id)-\(variant)", theme: theme, wallpaper: theme.chat.defaultWallpaper))
++            }
++            self.themeOptions = options
++            if self.selectedThemeIndex >= options.count {
++                self.selectedThemeIndex = 0
++            }
++            self.messagesView?.updateThemeOption(options[self.selectedThemeIndex])
++        }
++
++        private func selectTheme(_ index: Int) {
++            guard self.selectedThemeIndex != index, index < self.themeOptions.count else {
++                return
++            }
++            self.selectedThemeIndex = index
++            self.messagesView?.updateThemeOption(self.themeOptions[index])
++            self.state?.updated(transition: .immediate)
++        }
++
++        private func toggleAppearance() {
++            guard let component = self.component else {
++                return
++            }
++            self.isDarkAppearance = !self.isDarkAppearance
++            self.rebuildThemeOptions(context: component.context)
++            self.state?.updated(transition: .immediate)
++            Queue.mainQueue().justDispatch { [weak self] in
++                self?.appearanceButtonPlayOnce.invoke(Void())
++            }
++        }
++
++        private func updateScreenshotCounts() {
++            guard let messagesView = self.messagesView else {
++                return
++            }
++            let groups = messagesView.screenshotGroups()
++            let count = max(1, groups.count)
++            let messageCount = groups.reduce(0, { $0 + $1.count })
++            if count != self.screenshotCount || messageCount != self.screenshotMessageCount {
++                self.screenshotCount = count
++                self.screenshotMessageCount = messageCount
++                if !self.isUpdatingLayout {
++                    self.state?.updated(transition: .immediate)
++                }
++            }
++        }
++
++        // MARK: - Actions
++
++        /// Sends the screenshots through Telegram's share sheet, to any chats: one photo, or an album of several.
++        fileprivate func shareImages() {
++            guard let component = self.component, let controller = self.environment?.controller(), let images = self.messagesView?.renderImages(), !images.isEmpty else {
++                return
++            }
++            let context = component.context
++            // As the gallery picker sends a photo: a 320 px thumbnail and the photo itself within 2560 px.
++            var medias: [TelegramMediaImage] = []
++            for image in images {
++                var representations: [TelegramMediaImageRepresentation] = []
++                for maxSide in [320.0, PostShareMessagesView.maxPhotoPixelSide] as [CGFloat] {
++                    guard let (data, pixelSize) = postShareJpegData(image: image, maxPixelSide: maxSide, quality: maxSide < 1000.0 ? 0.4 : 0.95) else {
++                        continue
++                    }
++                    let resource = LocalFileMediaResource(fileId: Int64.random(in: Int64.min ... Int64.max))
++                    context.engine.resources.storeResourceData(id: EngineMediaResource.Id(resource.id), data: data, synchronous: true)
++                    representations.append(TelegramMediaImageRepresentation(
++                        dimensions: PixelDimensions(pixelSize),
++                        resource: resource,
++                        progressiveSizes: [],
++                        immediateThumbnailData: nil,
++                        hasVideo: false,
++                        isPersonal: false
++                    ))
++                }
++                if representations.count < 2 {
++                    continue
++                }
++                medias.append(TelegramMediaImage(
++                    imageId: EngineMedia.Id(namespace: Namespaces.Media.LocalImage, id: Int64.random(in: Int64.min ... Int64.max)),
++                    representations: representations,
++                    immediateThumbnailData: nil,
++                    reference: nil,
++                    partialReference: nil,
++                    flags: []
++                ))
++            }
++            if medias.isEmpty {
++                return
++            }
++
++            // The chats the sheet sent to, for the "sent" toast once the sheet and the editor have closed.
++            var sentPeerIds: [EnginePeer.Id] = []
++            let screenshotCount = medias.count
++            let sent = component.content.sent
++            let dismiss = component.dismiss
++            var didFinish = false
++            let finish: () -> Void = {
++                if didFinish {
++                    return
++                }
++                didFinish = true
++                dismiss()
++                if !sentPeerIds.isEmpty {
++                    sent?(sentPeerIds, screenshotCount)
++                }
++            }
++
++            // The same share sheet as forwarding a post (ShareScreen), not the legacy ShareController.
++            let shareController = context.sharedContext.makeShareScreen(context: context, params: ShareControllerParams(
++                subject: .fromExternal(medias.count, { peerIds, threadIds, _, text, account, _ in
++                    guard let account = account as? ShareControllerAppAccountContext else {
++                        return .single(.done)
++                    }
++                    Queue.mainQueue().async {
++                        sentPeerIds = peerIds
++                    }
++                    let signals = peerIds.map { peerId -> Signal<[EngineMessage.Id?], NoError> in
++                        // Several screenshots go as one album; the text typed in the share sheet goes with the first.
++                        let groupingKey: Int64? = medias.count > 1 ? Int64.random(in: Int64.min ... Int64.max) : nil
++                        let messages: [EnqueueMessage] = medias.enumerated().map { index, media in
++                            return .message(text: index == 0 ? text : "", attributes: [], inlineStickers: [:], mediaReference: .standalone(media: media), threadId: threadIds[peerId], replyToMessageId: nil, replyToStoryId: nil, localGroupingKey: groupingKey, correlationId: nil, bubbleUpEmojiOrStickersets: [])
++                        }
++                        return enqueueMessages(account: account.context.account, peerId: peerId, messages: messages)
++                    }
++                    return combineLatest(signals)
++                    |> castError(ShareControllerError.self)
++                    |> map { _ -> ShareControllerExternalStatus in
++                        return .done
++                    }
++                }),
++                externalShare: false,
++                actionCompleted: {
++                    finish()
++                },
++                completed: { peerIds in
++                    if !peerIds.isEmpty {
++                        sentPeerIds = peerIds
++                    }
++                    finish()
++                }
++            ))
++            controller.present(shareController, in: .window(.root))
++        }
++
++        // MARK: - Layout
++
++        func update(component: PostShareSheetContentComponent, availableSize: CGSize, state: EmptyComponentState, environment: Environment<EnvironmentType>, transition: ComponentTransition) -> CGSize {
++            self.isUpdatingLayout = true
++            defer {
++                self.isUpdatingLayout = false
++            }
++            if self.component == nil {
++                self.loadData(context: component.context)
++            }
++            self.component = component
++            self.state = state
++            let environment = environment[EnvironmentType.self].value
++            self.environment = environment
++            let theme = environment.theme
++
++            let sideInset: CGFloat = 16.0
++            var contentHeight: CGFloat = 16.0
++
++            // Header
++            let buttonSize = CGSize(width: 44.0, height: 44.0)
++            let closeSize = self.closeButton.update(
++                transition: .immediate,
++                component: AnyComponent(GlassBarButtonComponent(
++                    size: buttonSize,
++                    backgroundColor: nil,
++                    isDark: theme.overallDarkAppearance,
++                    state: .glass,
++                    component: AnyComponentWithIdentity(id: "close", component: AnyComponent(BundleIconComponent(
++                        name: "Navigation/Close",
++                        tintColor: theme.chat.inputPanel.panelControlColor
++                    ))),
++                    action: { [weak self] _ in
++                        self?.component?.dismiss()
++                    }
++                )),
++                environment: {},
++                containerSize: buttonSize
++            )
++            if let view = self.closeButton.view {
++                if view.superview == nil {
++                    self.addSubview(view)
++                }
++                view.frame = CGRect(origin: CGPoint(x: sideInset, y: contentHeight), size: closeSize)
++            }
++
++            // Day / night variants of the themes, with the sun-and-moon icon of the chat theme screen.
++            let appearanceSize = self.appearanceButton.update(
++                transition: .immediate,
++                component: AnyComponent(GlassBarButtonComponent(
++                    size: buttonSize,
++                    backgroundColor: nil,
++                    isDark: theme.overallDarkAppearance,
++                    state: .glass,
++                    component: AnyComponentWithIdentity(id: self.isDarkAppearance ? "night" : "day", component: AnyComponent(LottieComponent(
++                        content: LottieComponent.AppBundleContent(name: self.isDarkAppearance ? "anim_sun_reverse" : "anim_sun"),
++                        color: theme.chat.inputPanel.panelControlColor,
++                        startingPosition: .end,
++                        size: CGSize(width: 28.0, height: 28.0),
++                        playOnce: self.appearanceButtonPlayOnce
++                    ))),
++                    action: { [weak self] _ in
++                        self?.toggleAppearance()
++                    }
++                )),
++                environment: {},
++                containerSize: buttonSize
++            )
++            if let view = self.appearanceButton.view {
++                if view.superview == nil {
++                    self.addSubview(view)
++                }
++                view.frame = CGRect(origin: CGPoint(x: availableSize.width - sideInset - appearanceSize.width, y: contentHeight), size: appearanceSize)
++            }
++            let headerY = contentHeight
++            contentHeight += 44.0 + 22.0
++
++            // Messages
++            let messagesView: PostShareMessagesView
++            if let current = self.messagesView {
++                messagesView = current
++            } else {
++                messagesView = PostShareMessagesView(context: component.context, content: component.content, themeOption: self.themeOptions[self.selectedThemeIndex])
++                messagesView.present = { [weak self] controller, arguments in
++                    self?.environment?.controller()?.presentInGlobalOverlay(controller, with: arguments)
++                }
++                messagesView.screenshotsUpdated = { [weak self] in
++                    self?.updateScreenshotCounts()
++                }
++                self.messagesView = messagesView
++                self.addSubview(messagesView)
++            }
++            let blockWidth = availableSize.width - sideInset * 2.0
++            let blockSize = CGSize(width: blockWidth, height: blockWidth + PostShareMessagesView.extraHeight)
++            messagesView.frame = CGRect(origin: CGPoint(x: sideInset, y: contentHeight), size: blockSize)
++            messagesView.update(size: blockSize)
++            contentHeight += blockSize.height + 20.0
++            self.updateScreenshotCounts()
++
++            // Title, with how the messages split into screenshots.
++            let screenshotsText = self.screenshotCount == 1 ? "1 Screenshot" : "\(self.screenshotCount) Screenshots"
++            let messagesText = self.screenshotMessageCount == 1 ? "1 message" : "\(self.screenshotMessageCount) messages"
++            let titleString = NSMutableAttributedString(string: "Share it beautifully", font: Font.semibold(17.0), textColor: theme.list.itemPrimaryTextColor)
++            titleString.append(NSAttributedString(string: "\n\(screenshotsText) with \(messagesText)", font: Font.regular(13.0), textColor: theme.list.itemSecondaryTextColor))
++            let titleSize = self.title.update(
++                transition: .immediate,
++                component: AnyComponent(MultilineTextComponent(
++                    text: .plain(titleString),
++                    horizontalAlignment: .center,
++                    maximumNumberOfLines: 2
++                )),
++                environment: {},
++                containerSize: CGSize(width: availableSize.width - 120.0, height: 44.0)
++            )
++            if let view = self.title.view {
++                if view.superview == nil {
++                    self.addSubview(view)
++                }
++                view.frame = CGRect(origin: CGPoint(x: floor((availableSize.width - titleSize.width) / 2.0), y: headerY + floor((44.0 - titleSize.height) / 2.0)), size: titleSize)
++            }
++
++            // Themes
++            while self.colorButtons.count < self.themeOptions.count {
++                let index = self.colorButtons.count
++                let button = PostShareColorButton()
++                button.action = { [weak self] in
++                    self?.selectTheme(index)
++                }
++                self.colorsView.addSubview(button)
++                self.colorButtons.append(button)
++            }
++            let colorSpacing: CGFloat = 4.0
++            let colorSize = PostShareColorButton.size
++            self.colorsView.frame = CGRect(x: 0.0, y: contentHeight, width: availableSize.width, height: colorSize.height)
++            for (index, button) in self.colorButtons.enumerated() {
++                button.frame = CGRect(origin: CGPoint(x: sideInset - 2.0 + CGFloat(index) * (colorSize.width + colorSpacing), y: 0.0), size: colorSize)
++                button.update(colors: self.themeOptions[index].previewColors, isSelected: index == self.selectedThemeIndex, accentColor: theme.list.itemAccentColor)
++            }
++            self.colorsView.contentSize = CGSize(width: sideInset * 2.0 - 4.0 + CGFloat(self.colorButtons.count) * (colorSize.width + colorSpacing) - colorSpacing, height: colorSize.height)
++            contentHeight += colorSize.height + 16.0
++
++            self.separatorView.backgroundColor = theme.list.itemPlainSeparatorColor
++            self.separatorView.frame = CGRect(x: sideInset, y: contentHeight, width: availableSize.width - sideInset * 2.0, height: UIScreenPixel)
++            contentHeight += 20.0
++
++            // Share
++            let buttonInsets = ContainerViewLayout.concentricInsets(bottomInset: environment.safeInsets.bottom, innerDiameter: 52.0, sideInset: 30.0)
++            let shareSize = self.shareButton.update(
++                transition: transition,
++                component: AnyComponent(ButtonComponent(
++                    background: ButtonComponent.Background(
++                        style: .glass,
++                        color: theme.list.itemCheckColors.fillColor,
++                        foreground: theme.list.itemCheckColors.foregroundColor,
++                        pressedColor: theme.list.itemCheckColors.fillColor.withMultipliedAlpha(0.8)
++                    ),
++                    content: AnyComponentWithIdentity(id: "share", component: AnyComponent(ButtonTextContentComponent(
++                        text: self.screenshotCount == 1 ? "Share Screen" : "Share \(self.screenshotCount) Screens",
++                        badge: 0,
++                        textColor: theme.list.itemCheckColors.foregroundColor,
++                        badgeBackground: theme.list.itemCheckColors.foregroundColor,
++                        badgeForeground: theme.list.itemCheckColors.fillColor
++                    ))),
++                    isEnabled: self.screenshotMessageCount > 0,
++                    displaysProgress: false,
++                    action: { [weak self] in
++                        self?.shareImages()
++                    }
++                )),
++                environment: {},
++                containerSize: CGSize(width: availableSize.width - buttonInsets.left - buttonInsets.right, height: 52.0)
++            )
++            if let view = self.shareButton.view {
++                if view.superview == nil {
++                    self.addSubview(view)
++                }
++                transition.setFrame(view: view, frame: CGRect(origin: CGPoint(x: buttonInsets.left, y: contentHeight), size: shareSize))
++            }
++            contentHeight += shareSize.height + buttonInsets.bottom
++
++            return CGSize(width: availableSize.width, height: contentHeight)
++        }
++    }
++
++    func makeView() -> View {
++        return View(frame: CGRect())
++    }
++
++    func update(view: View, availableSize: CGSize, state: EmptyComponentState, environment: Environment<EnvironmentType>, transition: ComponentTransition) -> CGSize {
++        return view.update(component: self, availableSize: availableSize, state: state, environment: environment, transition: transition)
++    }
++}
++
++private final class PostShareSheetComponent: Component {
++    typealias EnvironmentType = ViewControllerComponentContainer.Environment
++
++    let context: AccountContext
++    let content: PostShareScreenshotContent
++
++    init(context: AccountContext, content: PostShareScreenshotContent) {
++        self.context = context
++        self.content = content
++    }
++
++    static func ==(lhs: PostShareSheetComponent, rhs: PostShareSheetComponent) -> Bool {
++        if lhs.context !== rhs.context {
++            return false
++        }
++        return true
++    }
++
++    final class View: UIView {
++        private let sheet = ComponentView<(ViewControllerComponentContainer.Environment, SheetComponentEnvironment)>()
++        private let sheetAnimateOut = ActionSlot<Action<Void>>()
++
++        private var environment: EnvironmentType?
++
++        override init(frame: CGRect) {
++            super.init(frame: frame)
++        }
++
++        required init?(coder: NSCoder) {
++            fatalError("init(coder:) has not been implemented")
++        }
++
++        private func dismissAnimated() {
++            guard let environment = self.environment else {
++                return
++            }
++            self.sheetAnimateOut.invoke(Action { _ in
++                environment.controller()?.dismiss(completion: nil)
++            })
++        }
++
++        func update(component: PostShareSheetComponent, availableSize: CGSize, state: EmptyComponentState, environment: Environment<EnvironmentType>, transition: ComponentTransition) -> CGSize {
++            let environment = environment[EnvironmentType.self].value
++            self.environment = environment
++
++            let sheetEnvironment = SheetComponentEnvironment(
++                metrics: environment.metrics,
++                deviceMetrics: environment.deviceMetrics,
++                isDisplaying: environment.isVisible,
++                isCentered: environment.presentsFloatingPanels,
++                hasInputHeight: !environment.inputHeight.isZero,
++                regularMetricsSize: CGSize(width: 430.0, height: 900.0),
++                dismiss: { [weak self] _ in
++                    self?.dismissAnimated()
++                }
++            )
++            let _ = self.sheet.update(
++                transition: transition,
++                component: AnyComponent(SheetComponent(
++                    content: AnyComponent(PostShareSheetContentComponent(
++                        context: component.context,
++                        content: component.content,
++                        dismiss: { [weak self] in
++                            self?.dismissAnimated()
++                        }
++                    )),
++                    style: .glass,
++                    backgroundColor: .color(environment.theme.actionSheet.opaqueItemBackgroundColor),
++                    animateOut: self.sheetAnimateOut
++                )),
++                environment: {
++                    environment
++                    sheetEnvironment
++                },
++                containerSize: availableSize
++            )
++            if let sheetView = self.sheet.view {
++                if sheetView.superview == nil {
++                    self.addSubview(sheetView)
++                }
++                transition.setFrame(view: sheetView, frame: CGRect(origin: CGPoint(), size: availableSize))
++            }
++
++            return availableSize
++        }
++    }
++
++    func makeView() -> View {
++        return View(frame: CGRect())
++    }
++
++    func update(view: View, availableSize: CGSize, state: EmptyComponentState, environment: Environment<EnvironmentType>, transition: ComponentTransition) -> CGSize {
++        return view.update(component: self, availableSize: availableSize, state: state, environment: environment, transition: transition)
++    }
++}
++
++/// "Share it beautifully": the screenshot editor. Dim messages, cut text, pick a background, share the image.
++public final class PostShareImageScreen: ViewControllerComponentContainer {
++    public init(context: AccountContext, content: PostShareScreenshotContent) {
++        super.init(context: context, component: PostShareSheetComponent(
++            context: context,
++            content: content
++        ), navigationBarAppearance: .none)
++
++        self.statusBar.statusBarStyle = .Ignore
++        self.navigationPresentation = .flatModal
++        self.blocksBackgroundWhenInOverlay = true
++    }
++
++    required public init(coder aDecoder: NSCoder) {
++        fatalError("init(coder:) has not been implemented")
++    }
++
++    override public func viewDidAppear(_ animated: Bool) {
++        super.viewDidAppear(animated)
++
++        self.view.disablesInteractiveModalDismiss = true
++    }
++}
+diff --git a/submodules/TelegramUI/Components/PostShareImageScreen/Sources/PostShareSmoothCorners.swift b/submodules/TelegramUI/Components/PostShareImageScreen/Sources/PostShareSmoothCorners.swift
+new file mode 100644
+index 0000000000..e67a019814
+--- /dev/null
++++ b/submodules/TelegramUI/Components/PostShareImageScreen/Sources/PostShareSmoothCorners.swift
+@@ -0,0 +1,72 @@
++import Foundation
++import UIKit
++
++/// A rounded rectangle with Figma's "corner smoothing" (the figma-squircle construction): each corner is a circular
++/// arc joined to the straight edges by two cubic curves, and `smoothing` (0...1) trades arc for curve. At 1 (100%)
++/// the arc vanishes and the corner is a single smooth curve. `UIBezierPath`'s continuous corners match only ~60%.
++func postShareSmoothRoundedRectPath(size: CGSize, cornerRadius: CGFloat, smoothing: CGFloat) -> UIBezierPath {
++    let width = size.width
++    let height = size.height
++    let budget = min(width, height) / 2.0
++    let radius = min(cornerRadius, budget)
++
++    // Smoothing extends each corner along its edges by up to `radius * smoothing`; keep that within the budget.
++    var smoothing = max(0.0, min(1.0, smoothing))
++    if radius > 0.0 {
++        smoothing = min(smoothing, max(0.0, budget / radius - 1.0))
++    }
++    let p = min((1.0 + smoothing) * radius, budget)
++
++    func radians(_ degrees: CGFloat) -> CGFloat {
++        return degrees * .pi / 180.0
++    }
++    let arcMeasure = 90.0 * (1.0 - smoothing)
++    let arcSectionLength = sin(radians(arcMeasure / 2.0)) * radius * sqrt(2.0)
++    let angleAlpha = (90.0 - arcMeasure) / 2.0
++    let p3ToP4Distance = radius * tan(radians(angleAlpha / 2.0))
++    let angleBeta = 45.0 * smoothing
++    let c = p3ToP4Distance * cos(radians(angleBeta))
++    let d = c * tan(radians(angleBeta))
++    let b = (p - arcSectionLength - c - d) / 3.0
++    let a = 2.0 * b
++
++    // Each corner in its own frame: `along` runs along the edge that enters the corner, `across` along the edge
++    // that leaves it, so one construction serves all four (the path runs clockwise).
++    struct Corner {
++        let point: CGPoint
++        let along: CGPoint
++        let across: CGPoint
++
++        func map(_ u: CGFloat, _ v: CGFloat) -> CGPoint {
++            return CGPoint(x: self.point.x + self.along.x * u + self.across.x * v, y: self.point.y + self.along.y * u + self.across.y * v)
++        }
++    }
++    let corners = [
++        Corner(point: CGPoint(x: width, y: 0.0), along: CGPoint(x: 1.0, y: 0.0), across: CGPoint(x: 0.0, y: 1.0)),
++        Corner(point: CGPoint(x: width, y: height), along: CGPoint(x: 0.0, y: 1.0), across: CGPoint(x: -1.0, y: 0.0)),
++        Corner(point: CGPoint(x: 0.0, y: height), along: CGPoint(x: -1.0, y: 0.0), across: CGPoint(x: 0.0, y: -1.0)),
++        Corner(point: CGPoint(x: 0.0, y: 0.0), along: CGPoint(x: 0.0, y: -1.0), across: CGPoint(x: 1.0, y: 0.0))
++    ]
++
++    let path = UIBezierPath()
++    for (index, corner) in corners.enumerated() {
++        let start = corner.map(-p, 0.0)
++        if index == 0 {
++            path.move(to: start)
++        } else {
++            path.addLine(to: start)
++        }
++        let arcStart = corner.map(-p + a + b + c, d)
++        path.addCurve(to: arcStart, controlPoint1: corner.map(-p + a, 0.0), controlPoint2: corner.map(-p + a + b, 0.0))
++        let arcEnd = corner.map(-d, p - a - b - c)
++        if arcSectionLength > 0.001 {
++            let center = corner.map(-radius, radius)
++            let startAngle = atan2(arcStart.y - center.y, arcStart.x - center.x)
++            let endAngle = atan2(arcEnd.y - center.y, arcEnd.x - center.x)
++            path.addArc(withCenter: center, radius: radius, startAngle: startAngle, endAngle: endAngle, clockwise: true)
++        }
++        path.addCurve(to: corner.map(0.0, p), controlPoint1: corner.map(0.0, p - a - b), controlPoint2: corner.map(0.0, p - a))
++    }
++    path.close()
++    return path
++}
+diff --git a/submodules/TelegramUI/Components/ShareScreen/Sources/ShareScreen.swift b/submodules/TelegramUI/Components/ShareScreen/Sources/ShareScreen.swift
+index 023d00bb11..22ada646b2 100644
+--- a/submodules/TelegramUI/Components/ShareScreen/Sources/ShareScreen.swift
++++ b/submodules/TelegramUI/Components/ShareScreen/Sources/ShareScreen.swift
+@@ -310,6 +310,8 @@ public final class ShareScreen: ViewControllerComponentContainer {
+     private let accountInUse = MetaDisposable()
+     private let completionDisposable = MetaDisposable()
+     private var uploadCompleted = false
++    /// The chats of the current `.fromExternal` send, reported through `sent` when it is done.
++    private var externalSendPeerIds: [EnginePeer.Id] = []
+     private let preferredAction: ShareControllerPreferredAction
+     fileprivate let externalShareSubject: ShareControllerSubject?
+     private let shareAsLink: Bool
+@@ -478,24 +480,29 @@ public final class ShareScreen: ViewControllerComponentContainer {
+         self.sender.navigationController = { [weak self] in self?.navigationController as? NavigationController }
+         self.sender.willEnqueue = { [weak self] ids in
+             guard let self else { return }
++            self.externalSendPeerIds = ids
+             let environment: ShareControllerEnvironment = self.externalConfiguration?.environment ?? ShareControllerAppEnvironment(sharedContext: self.context.sharedContext)
+             environment.donateSendMessageIntent(account: ShareControllerAppAccountContext(context: self.context), peerIds: ids)
+         }
+         self.sender.sent = { [weak self] ids in
+             guard let self else { return }
+-            let haptic = HapticFeedback()
+-            let hapticDelay = ids.count == 1 && ids.first == self.context.account.peerId ? 0.88 : 0.44
+-            Queue.mainQueue().after(hapticDelay) {
+-                haptic.success()
+-            }
+-            self.sent?(ids)
+-            self.close()
++            self.completeSend(ids: ids)
+         }
+         self.sender.enqueued = self.enqueued
+         self.sender.externalStatusUpdated = { [weak self] status in self?.updateExternalStatus(status) }
+         self.sender.mediaStartTimestamp = self.effectiveStartTimestamp
+     }
+ 
++    private func completeSend(ids: [EnginePeer.Id]) {
++        let haptic = HapticFeedback()
++        let hapticDelay = ids.count == 1 && ids.first == self.context.account.peerId ? 0.88 : 0.44
++        Queue.mainQueue().after(hapticDelay) {
++            haptic.success()
++        }
++        self.sent?(ids)
++        self.close()
++    }
++
+     private func refreshComponent() {
+         self.updateComponent(component: AnyComponent(ShareScreenComponent(model: self.model, sender: self.sender, externalShare: self.externalConfiguration == nil, initialCaption: self.caption, hasStory: self.shareStory != nil, animateOut: self.animateOut)), transition: .immediate)
+     }
+@@ -569,7 +576,16 @@ public final class ShareScreen: ViewControllerComponentContainer {
+     }
+ 
+     private func updateExternalStatus(_ status: ShareControllerExternalStatus) {
+-        guard let configuration = self.externalConfiguration, !self.uploadCompleted else { return }
++        guard !self.uploadCompleted else { return }
++        guard let configuration = self.externalConfiguration else {
++            // A `.fromExternal` subject inside the app (no share-extension configuration, so no upload progress UI):
++            // once its send is done, finish like an in-app send.
++            if case .done = status {
++                self.uploadCompleted = true
++                self.completeSend(ids: self.externalSendPeerIds)
++            }
++            return
++        }
+         let data = self.context.sharedContext.currentPresentationData.with { $0 }
+         if self.loadingNode == nil { self.caption = self.captureCaption?() ?? self.caption }
+         self.view.endEditing(true)
+diff --git a/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryItemSetContainerComponent.swift b/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryItemSetContainerComponent.swift
+index 5a230b1f2c..a1cacc8b1b 100644
+--- a/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryItemSetContainerComponent.swift
++++ b/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryItemSetContainerComponent.swift
+@@ -4801,7 +4801,7 @@ public final class StoryItemSetContainerComponent: Component {
+                                 }
+                             case .translate:
+                                 self.sendMessageContext.performTranslateTextAction(view: self, text: text.string, entities: [])
+-                            case .quote:
++                            case .quote, .cutFromScreenshot:
+                                 break
+                             }
+                         },
+diff --git a/submodules/TelegramUI/Components/TextProcessingScreen/Sources/TextProcessingTextAreaComponent.swift b/submodules/TelegramUI/Components/TextProcessingScreen/Sources/TextProcessingTextAreaComponent.swift
+index 0d9e98d93a..1500c82f0c 100644
+--- a/submodules/TelegramUI/Components/TextProcessingScreen/Sources/TextProcessingTextAreaComponent.swift
++++ b/submodules/TelegramUI/Components/TextProcessingScreen/Sources/TextProcessingTextAreaComponent.swift
+@@ -517,7 +517,7 @@ final class TextProcessingTextAreaComponent: Component {
+                             }
+                         case .translate:
+                             break
+-                        case .quote:
++                        case .quote, .cutFromScreenshot:
+                             break
+                         }
+                     })
+diff --git a/submodules/TelegramUI/Components/Wallet/WalletTransactionScreen/Sources/WalletTransactionScreen.swift b/submodules/TelegramUI/Components/Wallet/WalletTransactionScreen/Sources/WalletTransactionScreen.swift
+index 2c5c68e4bb..0cf20c2a4b 100644
+--- a/submodules/TelegramUI/Components/Wallet/WalletTransactionScreen/Sources/WalletTransactionScreen.swift
++++ b/submodules/TelegramUI/Components/Wallet/WalletTransactionScreen/Sources/WalletTransactionScreen.swift
+@@ -2416,7 +2416,7 @@ private final class WalletTransactionContentComponent: Component {
+                         controller.present(translationController, in: .window(.root))
+                     }
+                 })
+-            case .quote:
++            case .quote, .cutFromScreenshot:
+                 break
+             }
+         }
+diff --git a/submodules/TelegramUI/Sources/ChatController.swift b/submodules/TelegramUI/Sources/ChatController.swift
+index f32b3c1644..5a4ce38b01 100644
+--- a/submodules/TelegramUI/Sources/ChatController.swift
++++ b/submodules/TelegramUI/Sources/ChatController.swift
+@@ -540,6 +540,8 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+     weak var currentPinchSourceItemNode: ListViewItemNode?
+     
+     var screenCaptureManager: ScreenCaptureDetectionManager?
++    /// Offers the screenshot editor after a screenshot of a non-secret chat (ChatControllerOpenPostShareImage.swift).
++    var screenshotShareDisposable: Disposable?
+     
+     var volumeButtonsListener: VolumeButtonsListener?
+     
+@@ -4715,6 +4717,8 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+                 } else {
+                     self.updateChatPresentationInterfaceState(animated: true, interactive: true, { $0.updatedInterfaceState({ $0.withUpdatedReplyMessageSubject(nil).withUpdatedSendMessageEffect(nil).withUpdatedPostSuggestionState(nil) }) }, completion: completion)
+                 }
++            case .cutFromScreenshot:
++                break
+             }
+         }, displayImportedMessageTooltip: { [weak self] _ in
+             guard let strongSelf = self else {
+@@ -7224,6 +7228,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+         self.shareStatusDisposable?.dispose()
+         self.clearCacheDisposable?.dispose()
+         self.bankCardDisposable?.dispose()
++        self.screenshotShareDisposable?.dispose()
+         self.botCallbackAlertMessageDisposable?.dispose()
+         self.selectMessagePollOptionDisposables?.dispose()
+         for (_, info) in self.contextQueryStates {
+@@ -8091,6 +8096,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+             self.checkedPeerChatServiceActions = true
+             
+             self.setupScreenCaptureDetectionIfNeeded()
++            self.setupScreenshotShareIfNeeded()
+             
+             if case let .peer(peerId) = self.chatLocation {
+                 let _ = self.context.engine.peers.checkPeerChatServiceActions(peerId: peerId).startStandalone()
+diff --git a/submodules/TelegramUI/Sources/ChatControllerOpenPostShareImage.swift b/submodules/TelegramUI/Sources/ChatControllerOpenPostShareImage.swift
+new file mode 100644
+index 0000000000..30b27dc4c8
+--- /dev/null
++++ b/submodules/TelegramUI/Sources/ChatControllerOpenPostShareImage.swift
+@@ -0,0 +1,127 @@
++import Foundation
++import UIKit
++import SwiftSignalKit
++import Display
++import TelegramCore
++import AccountContext
++import ScreenCaptureDetection
++import UndoUI
++import ChatMessageItem
++import ChatMessageItemView
++import PostShareImageScreen
++
++extension ChatControllerImpl {
++    /// After a screenshot of a one-to-one chat, offers to share the captured messages as an edited image
++    /// ("Screenshot taken" toast, "Customize" opens the editor). Only private dialogs with a person: not groups,
++    /// channels, bots or Saved Messages, and not secret chats, where the screenshot is reported to the other side.
++    func setupScreenshotShareIfNeeded() {
++        guard self.screenshotShareDisposable == nil, case let .peer(peerId) = self.chatLocation, peerId.namespace == Namespaces.Peer.CloudUser, peerId != self.context.account.peerId else {
++            return
++        }
++        self.screenshotShareDisposable = (screenCaptureEvents()
++        |> deliverOnMainQueue).startStrict(next: { [weak self] event in
++            guard let self, case .still = event, self.traceVisibility() else {
++                return
++            }
++            if let user = self.presentationInterfaceState.renderedPeer?.chatMainPeer as? TelegramUser, user.botInfo != nil {
++                return
++            }
++            self.screenshotTaken()
++        })
++    }
++
++    /// The bubbles on screen when the screenshot was taken, oldest first; an album is one item.
++    private func capturedScreenshotItems() -> [[EngineMessage]] {
++        var items: [(index: EngineMessage.Index, messages: [EngineMessage])] = []
++        self.chatDisplayNode.historyNode.forEachVisibleMessageItemNode { itemNode in
++            guard let item = itemNode.item else {
++                return
++            }
++            var messages: [EngineMessage] = []
++            switch item.content {
++            case let .message(message, _, _, _, _):
++                messages.append(EngineMessage(message))
++            case let .group(groupMessages):
++                messages.append(contentsOf: groupMessages.map { EngineMessage($0.0) })
++            }
++            if !messages.isEmpty {
++                items.append((item.content.index, messages))
++            }
++        }
++        items.sort(by: { $0.index < $1.index })
++        return items.map(\.messages)
++    }
++
++    private func screenshotTaken() {
++        let items = self.capturedScreenshotItems()
++        if items.isEmpty {
++            return
++        }
++        // Copy-protected content must not be re-shared from the app.
++        if self.presentationInterfaceState.copyProtectionEnabled || items.contains(where: { $0.contains(where: { $0._asMessage().isCopyProtected() }) }) {
++            return
++        }
++
++        let presentationData = self.presentationData
++        self.present(UndoOverlayController(
++            presentationData: presentationData,
++            content: .info(title: "Screenshot taken", text: "Hide messages or cut text", timeout: 5.0, customUndoText: "Customize"),
++            elevatedLayout: false,
++            appearance: UndoOverlayController.Appearance(hidesIcon: true),
++            action: { [weak self] action in
++                if case .undo = action {
++                    self?.openScreenshotShareEditor(items: items)
++                }
++                return false
++            }
++        ), in: .current)
++    }
++
++    private func openScreenshotShareEditor(items: [[EngineMessage]]) {
++        self.chatDisplayNode.dismissInput()
++        self.push(PostShareImageScreen(context: self.context, content: PostShareScreenshotContent(items: items, sent: { [weak self] peerIds, count in
++            self?.presentScreenshotSentToast(peerIds: peerIds, count: count)
++        })))
++    }
++
++    /// "Screenshot sent to X", worded like the forward toast ("Message forwarded to X").
++    private func presentScreenshotSentToast(peerIds: [EnginePeer.Id], count: Int) {
++        let _ = (self.context.engine.data.get(
++            EngineDataList(
++                peerIds.map(TelegramEngine.EngineData.Item.Peer.RenderedPeer.init)
++            )
++        )
++        |> deliverOnMainQueue).startStandalone(next: { [weak self] peerList in
++            guard let self else {
++                return
++            }
++            let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
++            let peers = peerList.compactMap { $0?.chatOrMonoforumMainPeer }
++            func name(_ peer: EnginePeer) -> String {
++                let title = peer.id == self.context.account.peerId ? presentationData.strings.DialogList_SavedMessages : peer.displayTitle(strings: presentationData.strings, displayOrder: presentationData.nameDisplayOrder)
++                return title.replacingOccurrences(of: "**", with: "")
++            }
++            let subject = count == 1 ? "Screenshot" : "Screenshots"
++            let savedMessages = peerIds.count == 1 && peerIds.first == self.context.account.peerId
++            let text: String
++            if savedMessages {
++                text = "\(subject) saved to **Saved Messages**"
++            } else if peers.count == 1, let peer = peers.first {
++                text = "\(subject) sent to **\(name(peer))**"
++            } else if peers.count == 2 {
++                text = "\(subject) sent to **\(name(peers[0]))** and **\(name(peers[1]))**"
++            } else if let peer = peers.first {
++                text = "\(subject) sent to **\(name(peer))** and \(peers.count - 1) others"
++            } else {
++                return
++            }
++            self.present(UndoOverlayController(
++                presentationData: presentationData,
++                content: .forward(savedMessages: savedMessages, text: text),
++                elevatedLayout: false,
++                animateInAsReplacement: true,
++                action: { _ in return false }
++            ), in: .current)
++        })
++    }
++}
+diff --git a/submodules/TelegramUI/Sources/SharedAccountContext.swift b/submodules/TelegramUI/Sources/SharedAccountContext.swift
+index be2822e736..2b308263bd 100644
+--- a/submodules/TelegramUI/Sources/SharedAccountContext.swift
++++ b/submodules/TelegramUI/Sources/SharedAccountContext.swift
+@@ -133,6 +133,7 @@ import TextProcessingScreen
+ import CreateBotScreen
+ import EmojiStatusSelectionComponent
+ import EntityKeyboard
++import TextSelectionNode
+ 
+ private final class AccountUserInterfaceInUseContext {
+     let subscribers = Bag<(Bool) -> Void>()
+@@ -2549,7 +2550,12 @@ public final class SharedAccountContextImpl: SharedAccountContext {
+     }
+     
+     public func makeChatMessagePreviewItem(context: AccountContext, messages: [EngineMessage], theme: PresentationTheme, strings: PresentationStrings, wallpaper: TelegramWallpaper, fontSize: PresentationFontSize, chatBubbleCorners: PresentationChatBubbleCorners, dateTimeFormat: PresentationDateTimeFormat, nameOrder: PresentationPersonNameOrder, forcedResourceStatus: FileMediaResourceStatus?, tapMessage: ((EngineMessage) -> Void)?, clickThroughMessage: ((UIView?, CGPoint?) -> Void)? = nil, backgroundNode: ASDisplayNode?, availableReactions: AvailableReactions?, accountPeer: EnginePeer?, isCentered: Bool, isPreview: Bool, isStandalone: Bool, rank: String?, rankRole: ChatRankInfoScreenRole?, isGiftMessageComposerPreview: Bool, activateGiftMessageInput: (() -> Void)?) -> ListViewItem {
+-        return self.makeStandaloneChatMessageItem(context: context, messages: messages, theme: theme, strings: strings, wallpaper: wallpaper, fontSize: fontSize, chatBubbleCorners: chatBubbleCorners, dateTimeFormat: dateTimeFormat, nameOrder: nameOrder, forcedResourceStatus: forcedResourceStatus, tapMessage: tapMessage, clickThroughMessage: clickThroughMessage, backgroundNode: backgroundNode, availableReactions: availableReactions, accountPeer: accountPeer, isCentered: isCentered, isPreview: isPreview, isStandalone: isStandalone, rank: rank, rankRole: rankRole, isGiftMessageComposerPreview: isGiftMessageComposerPreview, activateGiftMessageInput: activateGiftMessageInput, feedActions: nil)
++        return self.makeStandaloneChatMessageItem(context: context, messages: messages, theme: theme, strings: strings, wallpaper: wallpaper, fontSize: fontSize, chatBubbleCorners: chatBubbleCorners, dateTimeFormat: dateTimeFormat, nameOrder: nameOrder, forcedResourceStatus: forcedResourceStatus, tapMessage: tapMessage, clickThroughMessage: clickThroughMessage, backgroundNode: backgroundNode, availableReactions: availableReactions, accountPeer: accountPeer, isCentered: isCentered, isPreview: isPreview, isStandalone: isStandalone, rank: rank, rankRole: rankRole, isGiftMessageComposerPreview: isGiftMessageComposerPreview, activateGiftMessageInput: activateGiftMessageInput, feedActions: nil, screenshotHooks: nil)
++    }
++
++    // Not a preview: a preview bubble shows the full date in its status, the screenshot editor shows the time as the chat does.
++    public func makeChatScreenshotMessageItem(context: AccountContext, messages: [EngineMessage], theme: PresentationTheme, strings: PresentationStrings, wallpaper: TelegramWallpaper, fontSize: PresentationFontSize, chatBubbleCorners: PresentationChatBubbleCorners, dateTimeFormat: PresentationDateTimeFormat, nameOrder: PresentationPersonNameOrder, backgroundNode: ASDisplayNode?, availableReactions: AvailableReactions?, accountPeer: EnginePeer?, hooks: ChatScreenshotMessageItemHooks) -> ListViewItem {
++        return self.makeStandaloneChatMessageItem(context: context, messages: messages, theme: theme, strings: strings, wallpaper: wallpaper, fontSize: fontSize, chatBubbleCorners: chatBubbleCorners, dateTimeFormat: dateTimeFormat, nameOrder: nameOrder, forcedResourceStatus: nil, tapMessage: nil, clickThroughMessage: nil, backgroundNode: backgroundNode, availableReactions: availableReactions, accountPeer: accountPeer, isCentered: false, isPreview: false, isStandalone: false, rank: nil, rankRole: nil, isGiftMessageComposerPreview: false, activateGiftMessageInput: nil, feedActions: nil, screenshotHooks: hooks)
+     }
+ 
+     public func makeChatMessageFeedItem(context: AccountContext, messages: [EngineMessage], presentationData: PresentationData, accountPeer: EnginePeer?, actions: ChatMessageFeedItemActions) -> ListViewItem {
+@@ -2558,12 +2564,12 @@ public final class SharedAccountContextImpl: SharedAccountContext {
+         // shows both in its channel line instead; the bubble's shape does not matter, it draws no background.
+         let corners = presentationData.chatBubbleCorners
+         let feedCorners = PresentationChatBubbleCorners(mainRadius: corners.mainRadius, auxiliaryRadius: corners.auxiliaryRadius, mergeBubbleCorners: corners.mergeBubbleCorners, hasTails: false, serifMessageText: corners.serifMessageText)
+-        return self.makeStandaloneChatMessageItem(context: context, messages: messages, theme: presentationData.theme, strings: presentationData.strings, wallpaper: presentationData.chatWallpaper, fontSize: presentationData.chatFontSize, chatBubbleCorners: feedCorners, dateTimeFormat: presentationData.dateTimeFormat, nameOrder: presentationData.nameDisplayOrder, forcedResourceStatus: nil, tapMessage: nil, clickThroughMessage: nil, backgroundNode: nil, availableReactions: nil, accountPeer: accountPeer, isCentered: false, isPreview: false, isStandalone: true, rank: nil, rankRole: nil, isGiftMessageComposerPreview: false, activateGiftMessageInput: nil, feedActions: actions)
++        return self.makeStandaloneChatMessageItem(context: context, messages: messages, theme: presentationData.theme, strings: presentationData.strings, wallpaper: presentationData.chatWallpaper, fontSize: presentationData.chatFontSize, chatBubbleCorners: feedCorners, dateTimeFormat: presentationData.dateTimeFormat, nameOrder: presentationData.nameDisplayOrder, forcedResourceStatus: nil, tapMessage: nil, clickThroughMessage: nil, backgroundNode: nil, availableReactions: nil, accountPeer: accountPeer, isCentered: false, isPreview: false, isStandalone: true, rank: nil, rankRole: nil, isGiftMessageComposerPreview: false, activateGiftMessageInput: nil, feedActions: actions, screenshotHooks: nil)
+     }
+ 
+     /// The item behind both the preview and the feed bubble; `feedActions` is set for the feed, which draws no
+     /// bubble background or author line and routes its taps to the host.
+-    private func makeStandaloneChatMessageItem(context: AccountContext, messages: [EngineMessage], theme: PresentationTheme, strings: PresentationStrings, wallpaper: TelegramWallpaper, fontSize: PresentationFontSize, chatBubbleCorners: PresentationChatBubbleCorners, dateTimeFormat: PresentationDateTimeFormat, nameOrder: PresentationPersonNameOrder, forcedResourceStatus: FileMediaResourceStatus?, tapMessage: ((EngineMessage) -> Void)?, clickThroughMessage: ((UIView?, CGPoint?) -> Void)?, backgroundNode: ASDisplayNode?, availableReactions: AvailableReactions?, accountPeer: EnginePeer?, isCentered: Bool, isPreview: Bool, isStandalone: Bool, rank: String?, rankRole: ChatRankInfoScreenRole?, isGiftMessageComposerPreview: Bool, activateGiftMessageInput: (() -> Void)?, feedActions: ChatMessageFeedItemActions?) -> ListViewItem {
++    private func makeStandaloneChatMessageItem(context: AccountContext, messages: [EngineMessage], theme: PresentationTheme, strings: PresentationStrings, wallpaper: TelegramWallpaper, fontSize: PresentationFontSize, chatBubbleCorners: PresentationChatBubbleCorners, dateTimeFormat: PresentationDateTimeFormat, nameOrder: PresentationPersonNameOrder, forcedResourceStatus: FileMediaResourceStatus?, tapMessage: ((EngineMessage) -> Void)?, clickThroughMessage: ((UIView?, CGPoint?) -> Void)?, backgroundNode: ASDisplayNode?, availableReactions: AvailableReactions?, accountPeer: EnginePeer?, isCentered: Bool, isPreview: Bool, isStandalone: Bool, rank: String?, rankRole: ChatRankInfoScreenRole?, isGiftMessageComposerPreview: Bool, activateGiftMessageInput: (() -> Void)?, feedActions: ChatMessageFeedItemActions?, screenshotHooks: ChatScreenshotMessageItemHooks?) -> ListViewItem {
+         let messages = messages.map { $0._asMessage() }
+         let controllerInteraction: ChatControllerInteraction
+ 
+@@ -2650,9 +2656,11 @@ public final class SharedAccountContextImpl: SharedAccountContext {
+                 return nil
+             },
+             chatControllerNode: {
+-                return nil
++                return screenshotHooks?.rootNode()
++            },
++            presentGlobalOverlayController: { controller, arguments in
++                screenshotHooks?.present(controller, arguments)
+             },
+-            presentGlobalOverlayController: { _, _ in },
+             callPeer: { _, _ in },
+             openConferenceCall: { _ in                
+             },
+@@ -2666,10 +2674,12 @@ public final class SharedAccountContextImpl: SharedAccountContext {
+             },
+             openSearch: {
+             },
+-            setupReply: { _ in
++            setupReply: { messageId in
++                // In the screenshot editor the reply swipe hides the message instead.
++                screenshotHooks?.toggleHidden(messageId)
+             },
+             canSetupReply: { _ in
+-                return .none
++                return screenshotHooks != nil ? .hideFromScreenshot : .none
+             },
+             canSendMessages: {
+                 return false
+@@ -2700,7 +2710,10 @@ public final class SharedAccountContextImpl: SharedAccountContext {
+             },
+             editScheduledMessagesTime: { _ in
+             },
+-            performTextSelectionAction: { _, _, _, _, _ in
++            performTextSelectionAction: { message, _, _, _, action in
++                if let screenshotHooks, let message, case let .cutFromScreenshot(range) = action {
++                    screenshotHooks.cutText(message.id, range)
++                }
+             },
+             displayImportedMessageTooltip: { _ in
+             },
+@@ -2832,6 +2845,7 @@ public final class SharedAccountContextImpl: SharedAccountContext {
+             stickerSettings: ChatInterfaceStickerSettings(),
+             presentationContext: ChatPresentationContext(context: context, backgroundNode: backgroundNode as? WallpaperBackgroundNode)
+         )
++        controllerInteraction.isScreenshotEditor = screenshotHooks != nil
+         
+         var entryAttributes = ChatMessageEntryAttributes()
+         entryAttributes.isCentered = isCentered
+diff --git a/submodules/TextSelectionNode/Sources/TextSelectionNode.swift b/submodules/TextSelectionNode/Sources/TextSelectionNode.swift
+index a29a16142a..dd98146b57 100644
+--- a/submodules/TextSelectionNode/Sources/TextSelectionNode.swift
++++ b/submodules/TextSelectionNode/Sources/TextSelectionNode.swift
+@@ -213,6 +213,8 @@ public enum TextSelectionAction: Equatable {
+     case speak
+     case translate
+     case quote(range: Range<Int>)
++    /// Hide the selected fragment under a spoiler in the screenshot editor.
++    case cutFromScreenshot(range: Range<Int>)
+ }
+ 
+ public final class TextSelectionNode: ASDisplayNode {
+@@ -284,6 +286,8 @@ public final class TextSelectionNode: ASDisplayNode {
+     public var enableCopy: Bool = true
+     public var enableLookup: Bool = true
+     public var enableQuote: Bool = false
++    /// The screenshot editor's mode: the menu offers only "Cut from screenshot".
++    public var enableCutFromScreenshot: Bool = false
+     public var selectAllAfterCopy: Bool = false
+     public var enableTranslate: Bool = true
+     public var enableSpeak: Bool = false
+@@ -836,6 +840,13 @@ public final class TextSelectionNode: ASDisplayNode {
+             }))
+         }
+         
++        if self.enableCutFromScreenshot {
++            actions = [ContextMenuAction(content: .text(title: "Cut from screenshot", accessibilityLabel: "Cut from screenshot"), action: { [weak self] in
++                self?.performAction(string, .cutFromScreenshot(range: adjustedRange.lowerBound ..< adjustedRange.upperBound))
++                self?.cancelSelection()
++            })]
++        }
++        
+         self.contextMenu?.dismiss()
+         
+         let contextMenu = makeContextMenuController(actions: actions, catchTapsOutside: false, hasHapticFeedback: false, isDark: self.theme.isDark, skipCoordnateConversion: self.menuSkipCoordnateConversion)
+diff --git a/submodules/UndoUI/Sources/UndoOverlayController.swift b/submodules/UndoUI/Sources/UndoOverlayController.swift
+index f80c6f5dc2..cd242bf13d 100644
+--- a/submodules/UndoUI/Sources/UndoOverlayController.swift
++++ b/submodules/UndoUI/Sources/UndoOverlayController.swift
+@@ -87,12 +87,15 @@ public final class UndoOverlayController: ViewController {
+         public var isBlurred: Bool?
+         public var sideInset: CGFloat?
+         public var bottomInset: CGFloat?
++        /// Leaves out the content's icon: the title and text start at the leading edge.
++        public var hidesIcon: Bool?
+         
+-        public init(isNarrow: Bool? = nil, isBlurred: Bool? = nil, sideInset: CGFloat? = nil, bottomInset: CGFloat? = nil) {
++        public init(isNarrow: Bool? = nil, isBlurred: Bool? = nil, sideInset: CGFloat? = nil, bottomInset: CGFloat? = nil, hidesIcon: Bool? = nil) {
+             self.isNarrow = isNarrow
+             self.isBlurred = isBlurred
+             self.sideInset = sideInset
+             self.bottomInset = bottomInset
++            self.hidesIcon = hidesIcon
+         }
+     }
+     
+diff --git a/submodules/UndoUI/Sources/UndoOverlayControllerNode.swift b/submodules/UndoUI/Sources/UndoOverlayControllerNode.swift
+index 6a87049a79..4c0fa6a2f7 100644
+--- a/submodules/UndoUI/Sources/UndoOverlayControllerNode.swift
++++ b/submodules/UndoUI/Sources/UndoOverlayControllerNode.swift
+@@ -1616,6 +1616,10 @@ final class UndoOverlayControllerNode: ViewControllerTracingNode {
+             self.isUserInteractionEnabled = true
+         }
+         
++        if self.appearance?.hidesIcon == true {
++            self.animationNode = nil
++        }
++        
+         self.titleNode.isUserInteractionEnabled = false
+         self.textNode.isUserInteractionEnabled = self.textNode.tapAttributeAction != nil
+         self.iconNode?.isUserInteractionEnabled = false
+@@ -1930,6 +1934,9 @@ final class UndoOverlayControllerNode: ViewControllerTracingNode {
+         } else if let multiAvatarsSize = self.multiAvatarsSize {
+             leftInset = 13.0 + multiAvatarsSize.width + 20.0
+         }
++        if self.appearance?.hidesIcon == true {
++            leftInset = 16.0
++        }
+         
+         let rightInset: CGFloat = 16.0
+         var contentHeight: CGFloat = 20.0
